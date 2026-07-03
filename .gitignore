@@ -5,6 +5,10 @@ models/*.gguf
 *.o
 /dictation
 
+# compiled test binaries (sources kept)
+tests/test_*
+!tests/test_*.c
+
 # personal scratch, not project source
 temp.txt
 chatresume.txt

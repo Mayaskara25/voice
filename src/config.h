@@ -15,6 +15,7 @@ struct app_config {
     char language[8];
     bool test_mode;                          /* true: print transcript instead of injecting */
     bool gui_enabled;                        /* true: also run the microui/Xlib status panel (Phase C) */
+    char gui_font[CONFIG_PATH_MAX];          /* X core font (XLFD/alias) for the GUI; empty = "fixed" */
 };
 
 /* Populates *cfg with defaults, then overrides from the key=value file at path.

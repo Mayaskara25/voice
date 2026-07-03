@@ -1,7 +1,9 @@
 #include "audio_alsa.h"
 #include "config.h"
+#include "gui_xlib.h"
 #include "hotkey_evdev.h"
 #include "inject_xtest.h"
+#include "ipc_handoff.h"
 #include "log.h"
 #include "stt_whisper.h"
 
@@ -13,15 +15,24 @@
 #include <string.h>
 
 struct pipeline_ctx {
-    struct stt_context *stt;
-    Display *dpy;               /* NULL in test_mode */
+    struct stt_context      *stt;
+    Display                 *dpy;   /* headless direct-injection target; NULL in test-mode/GUI mode */
     const struct app_config *cfg;
+    struct ipc_handoff      *ipc;   /* non-NULL in GUI mode: publish state + hand off injection */
 };
+
+/* Publishes a pipeline state to the GUI (no-op in headless mode). */
+static void publish_state(struct pipeline_ctx *ctx, enum app_state st)
+{
+    if (ctx->ipc)
+        ipc_set_state(ctx->ipc, st);
+}
 
 static void on_ptt_down(void *user_data)
 {
     struct pipeline_ctx *ctx = user_data;
     log_info("pipeline: recording...");
+    publish_state(ctx, APP_STATE_RECORDING);
     audio_capture_start(ctx->cfg->audio_device);
 }
 
@@ -32,28 +43,49 @@ static void on_ptt_up(void *user_data)
     struct audio_buffer buf;
     if (audio_capture_stop(&buf) != 0 || buf.n_samples == 0) {
         log_warn("pipeline: no audio captured");
+        publish_state(ctx, APP_STATE_IDLE);
         return;
     }
 
     log_info("pipeline: transcribing...");
+    publish_state(ctx, APP_STATE_TRANSCRIBING);
     char *text = stt_transcribe(ctx->stt, buf.samples, buf.n_samples);
     audio_capture_free(&buf);
 
     if (!text || text[0] == '\0') {
         log_warn("pipeline: empty transcript, nothing to do");
         free(text);
+        publish_state(ctx, APP_STATE_IDLE);
         return;
     }
+
+    /* --- Phase B insertion point (LLM cleanup) ---
+     * When llm_cleanup.c lands, insert here, unchanged around it:
+     *     if (ctx->cfg->llama_model_path[0] != '\0') {
+     *         publish_state(ctx, APP_STATE_CLEANING);
+     *         char *cleaned = llm_clean(ctx->llm, text);
+     *         if (cleaned) { free(text); text = cleaned; }
+     *     }
+     * The GUI already renders APP_STATE_CLEANING, and the handoff already
+     * carries the state -- no threading or GUI change is needed then. */
 
     if (ctx->cfg->test_mode) {
         printf("%s\n", text);
         fflush(stdout);
+        free(text);
+        publish_state(ctx, APP_STATE_IDLE);
+    } else if (ctx->ipc) {
+        /* GUI mode: hand the text (ownership transfers) to the GUI thread, which
+         * owns the X Display, performs the injection, then sets IDLE. This keeps
+         * Display single-threaded (see PLAN.md forward-compatibility contract). */
+        log_info("pipeline: handing text to GUI thread for injection");
+        ipc_post_inject(ctx->ipc, text);
     } else {
+        /* Headless mode: inject directly on this (worker) thread. */
         log_info("pipeline: injecting text");
         inject_type_text(ctx->dpy, text);
+        free(text);
     }
-
-    free(text);
 }
 
 struct hotkey_thread_args {
@@ -73,22 +105,101 @@ static void handle_signal(int sig)
 {
     (void)sig;
     hotkey_request_stop();
+    gui_request_stop(); /* no-op if the GUI isn't running */
 }
 
 static void print_usage(const char *argv0)
 {
     fprintf(stderr,
-        "usage: %s [--config PATH] [--test-mode] [--list-keys] [-h|--help]\n"
+        "usage: %s [--config PATH] [--test-mode] [--gui] [--list-keys] [-h|--help]\n"
         "  --config PATH   config file (default: configs/example.conf)\n"
         "  --test-mode     print transcripts to stdout instead of injecting\n"
+        "  --gui           show the microui/Xlib status panel (overrides config)\n"
         "  --list-keys     print (device, evdev code, name) for keypresses, then exit\n",
         argv0);
+}
+
+/* Runs the headless pipeline: worker thread injects directly, main joins.
+ * Identical behavior to Phase A. Returns process exit code. */
+static int run_headless(struct stt_context *stt, struct app_config *cfg)
+{
+    Display *dpy = NULL;
+    if (!cfg->test_mode) {
+        dpy = inject_open_display();
+        if (!dpy)
+            return 1;
+    }
+
+    struct pipeline_ctx pctx = { .stt = stt, .dpy = dpy, .cfg = cfg, .ipc = NULL };
+    struct hotkey_thread_args hargs = { .cfg = cfg, .user_data = &pctx };
+
+    log_info("dictation: ready (test_mode=%s, gui=false) -- hold your PTT key to dictate",
+             cfg->test_mode ? "true" : "false");
+
+    pthread_t hotkey_thread;
+    if (pthread_create(&hotkey_thread, NULL, hotkey_thread_fn, &hargs) != 0) {
+        log_error("main: failed to spawn hotkey thread");
+        inject_close_display(dpy);
+        return 1;
+    }
+
+    pthread_join(hotkey_thread, NULL);
+    inject_close_display(dpy);
+    return 0;
+}
+
+/* Runs the GUI pipeline: main thread becomes the X/GUI thread (owns Display,
+ * renders, injects); worker thread runs the same capture->stt pipeline but
+ * publishes state and hands off injection via ipc_handoff. Returns exit code. */
+static int run_gui(struct stt_context *stt, struct app_config *cfg)
+{
+    Display *dpy = inject_open_display();
+    if (!dpy)
+        return 1;
+
+    struct ipc_handoff ipc;
+    if (ipc_init(&ipc) != 0) {
+        inject_close_display(dpy);
+        return 1;
+    }
+
+    struct gui gui;
+    if (gui_init(&gui, dpy, &ipc, cfg->gui_font) != 0) {
+        ipc_free(&ipc);
+        inject_close_display(dpy);
+        return 1;
+    }
+
+    struct pipeline_ctx pctx = { .stt = stt, .dpy = NULL, .cfg = cfg, .ipc = &ipc };
+    struct hotkey_thread_args hargs = { .cfg = cfg, .user_data = &pctx };
+
+    log_info("dictation: ready (test_mode=%s, gui=true) -- hold your PTT key to dictate",
+             cfg->test_mode ? "true" : "false");
+
+    pthread_t hotkey_thread;
+    if (pthread_create(&hotkey_thread, NULL, hotkey_thread_fn, &hargs) != 0) {
+        log_error("main: failed to spawn hotkey thread");
+        gui_destroy(&gui);
+        ipc_free(&ipc);
+        inject_close_display(dpy);
+        return 1;
+    }
+
+    gui_run(&gui);            /* blocks on the main/GUI thread until signaled */
+    hotkey_request_stop();    /* make sure the worker unwinds too */
+    pthread_join(hotkey_thread, NULL);
+
+    gui_destroy(&gui);
+    ipc_free(&ipc);
+    inject_close_display(dpy);
+    return 0;
 }
 
 int main(int argc, char **argv)
 {
     const char *config_path = "configs/example.conf";
     bool force_test_mode = false;
+    bool force_gui = false;
     bool list_keys = false;
 
     for (int i = 1; i < argc; i++) {
@@ -96,6 +207,8 @@ int main(int argc, char **argv)
             config_path = argv[++i];
         } else if (strcmp(argv[i], "--test-mode") == 0) {
             force_test_mode = true;
+        } else if (strcmp(argv[i], "--gui") == 0) {
+            force_gui = true;
         } else if (strcmp(argv[i], "--list-keys") == 0) {
             list_keys = true;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -116,6 +229,8 @@ int main(int argc, char **argv)
         return 1;
     if (force_test_mode)
         cfg.test_mode = true;
+    if (force_gui)
+        cfg.gui_enabled = true;
     if (config_validate(&cfg) != 0)
         return 1;
 
@@ -123,36 +238,12 @@ int main(int argc, char **argv)
     if (stt_init(&stt, cfg.whisper_model_path, cfg.n_threads) != 0)
         return 1;
 
-    Display *dpy = NULL;
-    if (!cfg.test_mode) {
-        dpy = inject_open_display();
-        if (!dpy) {
-            stt_free(&stt);
-            return 1;
-        }
-    }
-
-    struct pipeline_ctx pctx = { .stt = &stt, .dpy = dpy, .cfg = &cfg };
-    struct hotkey_thread_args hargs = { .cfg = &cfg, .user_data = &pctx };
-
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
 
-    log_info("dictation: ready (test_mode=%s, gui=%s) -- hold your PTT key to dictate",
-              cfg.test_mode ? "true" : "false", cfg.gui_enabled ? "true" : "false");
-
-    pthread_t hotkey_thread;
-    if (pthread_create(&hotkey_thread, NULL, hotkey_thread_fn, &hargs) != 0) {
-        log_error("main: failed to spawn hotkey thread");
-        stt_free(&stt);
-        inject_close_display(dpy);
-        return 1;
-    }
-
-    pthread_join(hotkey_thread, NULL);
+    int ret = cfg.gui_enabled ? run_gui(&stt, &cfg) : run_headless(&stt, &cfg);
 
     log_info("dictation: shutting down");
     stt_free(&stt);
-    inject_close_display(dpy);
-    return 0;
+    return ret;
 }

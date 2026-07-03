@@ -21,6 +21,7 @@ void config_set_defaults(struct app_config *cfg)
     snprintf(cfg->language, sizeof(cfg->language), "en");
     cfg->test_mode = false;
     cfg->gui_enabled = false;
+    cfg->gui_font[0] = '\0';
 }
 
 static char *trim(char *s)
@@ -64,6 +65,8 @@ static void apply_kv(struct app_config *cfg, const char *key, const char *value)
         cfg->test_mode = parse_bool(value, cfg->test_mode);
     } else if (strcmp(key, "gui_enabled") == 0) {
         cfg->gui_enabled = parse_bool(value, cfg->gui_enabled);
+    } else if (strcmp(key, "gui_font") == 0) {
+        snprintf(cfg->gui_font, sizeof(cfg->gui_font), "%s", value);
     } else {
         log_warn("config: unknown key '%s' ignored", key);
     }
