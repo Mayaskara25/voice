@@ -1,0 +1,10 @@
+whisper.cpp/build/
+llama.cpp/build/
+models/*.bin
+models/*.gguf
+*.o
+/dictation
+
+# personal scratch, not project source
+temp.txt
+chatresume.txt
