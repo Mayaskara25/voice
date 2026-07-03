@@ -136,7 +136,7 @@ Each phase ends with an explicit end-to-end manual test (described per-phase abo
 
 ## Progress log
 
-### Phase C — implemented (live focus/dictation check pending user confirmation)
+### Phase C — done
 
 - **Repo hardening (done first)**: top-level `git init` + baseline commit of the working Phase A tree. The vendored `whisper.cpp/` and `microui/` each carried their own `.git` (whisper's was 41 MB); removed and committed as flat vendored source (upstream tags recorded in `README.md`: whisper.cpp `v1.9.1-81-g6fc7c33b`, microui `0850aba`/v2.02). Added `README.md` (setup/build/run/config/privacy) and a `tests/` suite + `make test`.
 - **`ipc_handoff.{h,c}`**: mutex + self-pipe (both ends `O_NONBLOCK`) + `enum app_state` + `pending_inject_text` + `last_transcript`. Worker publishes every state transition and signals the pipe; GUI polls the read end. Verified standalone (`tests/test_ipc.c`): a byte written on one thread reliably wakes a `poll()` on another, and state/inject-text transfer round-trips.
@@ -145,7 +145,7 @@ Each phase ends with an explicit end-to-end manual test (described per-phase abo
 - **`main.c` rewired**: pipeline refactored into one mode-parameterized path (`publish_state()` is a no-op headless, `ipc_set_state` in GUI mode). Headless path preserved exactly (Phase A behavior). GUI path: main thread becomes X/GUI thread, worker thread runs capture→stt and hands off via `ipc_post_inject`. An explicit **Phase B insertion point** for the `CLEANING`/`llm_clean` stage is marked in `on_ptt_up` — the handoff and GUI already carry `APP_STATE_CLEANING`, so Phase B drops in with no re-threading. Added `--gui` flag and optional `gui_font` config key.
 - **Build**: `Makefile` now compiles `microui/src/microui.c` + the 3 new modules; no new system deps (Xlib core drawing covered by existing `-lX11`). Project sources build warning-clean (one pre-existing `-Wformat-truncation` warning remains in Phase A `hotkey_evdev.c`, untouched). `make test` (config parser, self-pipe handoff, whisper-on-jfk.wav) passes.
 - **Smoke test (this machine, `--gui --test-mode`)**: whisper loaded → X display opened → `fixed` font loaded → override-redirect panel created → evdev auto-detected `/dev/input/event3` and listening (confirms the `input` group is now active post-relogin) → on SIGTERM the GUI `poll()` woke via the self-pipe, the loop exited, and cleanup ran in order. No crash, clean shutdown.
-- **Still to confirm (user-run, per Phase C done-criteria)**: (a) the panel never requires reclaiming focus — dictate into a separate editor and confirm its caret keeps blinking; (b) live PTT dictation shows the label progress `idle→recording→transcribing→injecting→idle` while the text lands in the *focused editor*, which stays focused throughout.
+- **Manual verification (user-run) — both passed**: (a) the panel never requires reclaiming focus — dictated into a separate editor, its caret kept blinking; (b) live PTT dictation showed the label progress `idle→recording→transcribing→injecting→idle` while the text landed in the *focused editor*, which stayed focused throughout. (The `injecting` label render was fixed after an initial ordering bug where it was skipped — commit `72d21dc`.)
 
 ### Phase A — done
 
