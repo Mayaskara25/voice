@@ -256,14 +256,22 @@ int gui_run(struct gui *g)
 
         if (fds[1].revents & POLLIN) {
             ipc_drain(g->ipc);
+            /* Paint the just-published state FIRST, before consuming the text --
+             * otherwise the INJECTING label would be overwritten by IDLE below
+             * and never actually shown. */
+            render(g);
             char *text = ipc_take_inject_text(g->ipc);
             if (text) {
-                /* Injection happens here, on the GUI thread that owns Display. */
+                /* Injection happens here, on the GUI thread that owns Display;
+                 * it blocks, so the INJECTING label stays up for its duration. */
                 inject_type_text(g->dpy, text);
                 free(text);
-                ipc_set_state(g->ipc, APP_STATE_IDLE);
+                /* Return to IDLE only if the worker hasn't already begun a new
+                 * utterance (re-pressed PTT) while we were typing. */
+                if (ipc_get_state(g->ipc) == APP_STATE_INJECTING)
+                    ipc_set_state(g->ipc, APP_STATE_IDLE);
+                render(g); /* reflect IDLE (or leave the worker's new state) */
             }
-            render(g); /* reflect the new state */
         }
         /* X activity is drained at the top of the next iteration. */
     }
