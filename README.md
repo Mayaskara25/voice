@@ -52,10 +52,12 @@ wget -O models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf \
   https://huggingface.co/bartowski/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf
 ```
 
-Then set `llama_model_path` in the config (already set in `example.conf`). To **disable**
-cleanup, leave `llama_model_path` blank — the app then needs no CUDA toolkit and you can build
-CPU-only. `n_gpu_layers=0` runs the model on CPU (much slower). The `llama.cpp` vendored here
-is pinned so its bundled ggml (0.15.3) matches whisper's, letting both share one ggml backend.
+Then set `llama_model_path` in the config (already set in `example.conf`). Leaving it **blank
+disables cleanup at runtime** (raw whisper output). Note: the current build always links
+llama.cpp + CUDA (`make` builds `deps-llama`), so the toolkit is required to build even if you
+run with cleanup off; a compile-time opt-out is possible future work. `n_gpu_layers=0` runs
+the model on CPU (much slower). The vendored `llama.cpp` is pinned so its bundled ggml (0.15.3)
+matches whisper's, letting both share one ggml backend.
 
 ### Microphone gain / capture device (read this — it bit us)
 
@@ -85,7 +87,8 @@ make test       # unit tests: config parser, self-pipe handoff, whisper on jfk.w
 `make` targets: `all`, `app`, `deps-whisper`, `deps-llama`, `test`, `run`, `list-keys`,
 `clean`, `distclean` (also removes the slow-to-rebuild vendored `build/` dirs). The
 `deps-llama` sub-build compiles llama.cpp with `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75`
-(GTX 1650). If you don't want LLM cleanup, you can skip it and leave `llama_model_path` blank.
+(GTX 1650). LLM cleanup is optional at **runtime** (blank `llama_model_path`), but the build
+currently links llama.cpp + CUDA unconditionally.
 
 ## Run
 
