@@ -19,6 +19,7 @@ void config_set_defaults(struct app_config *cfg)
     cfg->ptt_keycode = 97; /* KEY_RIGHTCTRL */
     cfg->audio_device[0] = '\0';
     cfg->n_threads = 8;
+    cfg->whisper_use_gpu = false; /* CPU by default; example.conf enables GPU */
     snprintf(cfg->language, sizeof(cfg->language), "en");
     cfg->test_mode = false;
     cfg->gui_enabled = false;
@@ -62,6 +63,8 @@ static void apply_kv(struct app_config *cfg, const char *key, const char *value)
         cfg->ptt_keycode = atoi(value);
     } else if (strcmp(key, "n_threads") == 0) {
         cfg->n_threads = atoi(value);
+    } else if (strcmp(key, "whisper_use_gpu") == 0) {
+        cfg->whisper_use_gpu = parse_bool(value, cfg->whisper_use_gpu);
     } else if (strcmp(key, "language") == 0) {
         snprintf(cfg->language, sizeof(cfg->language), "%s", value);
     } else if (strcmp(key, "test_mode") == 0) {

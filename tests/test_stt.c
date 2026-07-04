@@ -4,6 +4,7 @@
 #include "stt_whisper.h"
 
 #include <ctype.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,7 +77,11 @@ int main(void)
     }
 
     struct stt_context stt;
-    if (stt_init(&stt, MODEL_PATH, 4) != 0) {
+    /* exercise the GPU path (env override: DICT_TEST_GPU=0 forces CPU) */
+    bool use_gpu = true;
+    const char *g = getenv("DICT_TEST_GPU");
+    if (g && atoi(g) == 0) use_gpu = false;
+    if (stt_init(&stt, MODEL_PATH, 4, use_gpu) != 0) {
         fprintf(stderr, "test_stt: FAIL stt_init\n");
         free(samples);
         return 1;

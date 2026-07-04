@@ -136,6 +136,14 @@ Each phase ends with an explicit end-to-end manual test (described per-phase abo
 
 ## Progress log
 
+### Enhancement — whisper on GPU (done)
+
+- **Motivation**: after Phase B, transcription (CPU) was the largest latency chunk while the LLM cleanup already ran on GPU. Moved whisper to the GTX 1650 too.
+- **Nearly free, no whisper rebuild**: whisper.cpp selects its GPU backend at *runtime* via the ggml device registry (`whisper_backend_init_gpu`), not at compile time. Because the app already links llama's CUDA-enabled ggml 0.15.3, whisper only needed `use_gpu=true` to discover the CUDA0 device — confirmed in the log: `whisper_model_load: CUDA0 total size = 147.37 MB`, `whisper_backend_init_gpu: using CUDA0 backend`. The whisper.cpp CMake build stayed CPU-only (`-DGGML_CUDA=OFF`); it doesn't matter since we link llama's ggml.
+- **Change**: `stt_init` gained a `bool use_gpu` param (sets `cparams.use_gpu`/`gpu_device`); new `whisper_use_gpu` config key (default `false` in code, `true` in `example.conf`); callers in `main.c` + `tests/test_stt.c` updated (test defaults to GPU, `DICT_TEST_GPU=0` forces CPU). No Makefile change.
+- **Latency (11 s jfk.wav, `test_stt` wall incl. one-time model load)**: CPU ~2.3-2.4 s → GPU ~1.0-1.3 s. Per-utterance transcription in the daemon (model loaded once) is faster still since load is amortized. Both models resident together: whisper 147 MB + Qwen ~940 MB ≈ 1.1 GB of the 4 GB card; no contention (sequential transcribe→clean). `test_stt` still passes on the GPU path (correctness through the shared ggml). Graceful CPU fallback if no GPU (`whisper_use_gpu=false` verified identical to before).
+- Optional future: `flash_attn=true` (extra Turing speedup); building whisper itself with CUDA is unnecessary given the shared ggml.
+
 ### Phase B — done
 
 - **Compute decision: GPU.** CPU cleanup on the Ryzen 5 3550H was estimated at ~3-7 s/utterance; the GTX 1650 (4 GB) runs Qwen2.5-1.5B Q4_K_M in ~1-1.5 s incl. one-time load. User chose GPU from the start.

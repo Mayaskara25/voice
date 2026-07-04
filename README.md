@@ -121,6 +121,7 @@ Key = value, `#` starts a comment (see `configs/example.conf`):
 | `ptt_keycode` | **evdev** key code (from `--list-keys`), *not* an X keysym; default 97 = RIGHTCTRL |
 | `audio_device` | ALSA capture device (e.g. `plughw:2,0`); blank = auto-detect |
 | `n_threads` | whisper CPU threads (also the LLM's CPU threads) |
+| `whisper_use_gpu` | `true` = run whisper on the GPU (shares the CUDA backend; CPU fallback if none) |
 | `language` | fixed `en` for now |
 | `test_mode` | `true` = print instead of inject |
 | `gui_enabled` | `true` = show the status panel |

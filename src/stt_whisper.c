@@ -6,12 +6,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-int stt_init(struct stt_context *stt, const char *model_path, int n_threads)
+int stt_init(struct stt_context *stt, const char *model_path, int n_threads, bool use_gpu)
 {
     memset(stt, 0, sizeof(*stt));
 
     struct whisper_context_params cparams = whisper_context_default_params();
-    cparams.use_gpu = false; /* CPU-only per PLAN.md */
+    /* GPU offload via the shared ggml CUDA backend (whisper falls back to CPU
+     * on its own if no GPU device is found). */
+    cparams.use_gpu    = use_gpu;
+    cparams.gpu_device = 0;
 
     stt->whisper_ctx = whisper_init_from_file_with_params(model_path, cparams);
     if (!stt->whisper_ctx) {
@@ -20,7 +23,8 @@ int stt_init(struct stt_context *stt, const char *model_path, int n_threads)
     }
 
     stt->n_threads = n_threads > 0 ? n_threads : 4;
-    log_info("stt: whisper model loaded from '%s' (n_threads=%d)", model_path, stt->n_threads);
+    log_info("stt: whisper model loaded from '%s' (n_threads=%d, use_gpu=%s)",
+             model_path, stt->n_threads, use_gpu ? "true" : "false");
     return 0;
 }
 

@@ -241,7 +241,7 @@ int main(int argc, char **argv)
         return 1;
 
     struct stt_context stt;
-    if (stt_init(&stt, cfg.whisper_model_path, cfg.n_threads) != 0)
+    if (stt_init(&stt, cfg.whisper_model_path, cfg.n_threads, cfg.whisper_use_gpu) != 0)
         return 1;
 
     /* Optional LLM cleanup (Phase B): only when a model is configured. Failure

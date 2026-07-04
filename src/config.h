@@ -12,6 +12,7 @@ struct app_config {
     int  ptt_keycode;                        /* Linux evdev code (input-event-codes.h), NOT an X keysym/keycode */
     char audio_device[CONFIG_PATH_MAX];       /* empty = auto-detect an ALSA capture card; e.g. "plughw:2,0" */
     int  n_threads;
+    bool whisper_use_gpu;                    /* true: offload whisper to the GPU (else CPU) */
     char language[8];
     bool test_mode;                          /* true: print transcript instead of injecting */
     bool gui_enabled;                        /* true: also run the microui/Xlib status panel (Phase C) */
