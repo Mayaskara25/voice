@@ -136,7 +136,7 @@ Each phase ends with an explicit end-to-end manual test (described per-phase abo
 
 ## Progress log
 
-### Phase B — implemented (GPU-accelerated LLM cleanup; live mic quality check pending user)
+### Phase B — done
 
 - **Compute decision: GPU.** CPU cleanup on the Ryzen 5 3550H was estimated at ~3-7 s/utterance; the GTX 1650 (4 GB) runs Qwen2.5-1.5B Q4_K_M in ~1-1.5 s incl. one-time load. User chose GPU from the start.
 - **llama.cpp pinned + shared-ggml strategy (the crux).** Vendored `llama.cpp` as flat source, pinned to **`96183e982`** ("ggml : bump version to 0.15.3") — the exact commit whose bundled ggml (**0.15.3**) matches whisper.cpp's, AND which supports the `qwen2` arch (`LLM_ARCH_QWEN2`, `src/models/qwen2.cpp`). whisper.cpp and llama.cpp each vendor their own ggml; with static libs you can't link two. **Resolution: link llama's CUDA-enabled ggml 0.15.3 for BOTH** (`-lggml -lggml-base -lggml-cpu -lggml-cuda` from `llama.cpp/build/`, wrapped in `--start-group`; drop whisper's ggml `-L`). whisper's CPU path uses the CPU backend inside that same ggml (`use_gpu=false`); no whisper rebuild needed. The app binary is ~200 MB (CUDA kernels statically linked).
@@ -150,7 +150,7 @@ Each phase ends with an explicit end-to-end manual test (described per-phase abo
 - **`tests/test_llm.c`** added (skips if model absent): asserts content words preserved, first letter capitalized, terminal punctuation, no runaway. **All four tests pass** (`test_config`/`test_ipc`/`test_stt`/`test_llm`).
 - **Daemon smoke test** (`--test-mode`, cleanup on): whisper (CPU) + Qwen (GPU, 934 MB VRAM) both load, ready, clean SIGTERM shutdown.
 - **Latency**: `test_llm` total 1.53 s wall *including* one-time GPU model load; per-utterance cleanup (model stays loaded in the daemon) is sub-second.
-- **Still to confirm (user-run):** live PTT dictation with cleanup on — speak a messy phrase, confirm the injected text is cleaned and (with `--gui`) the panel shows `... → cleaning → injecting`.
+- **Live mic verification (user-run) — passed**: PTT dictation with cleanup on produced cleaned, correctly-capitalized injected text (contraction apostrophes intact), and the GUI panel progressed `... → cleaning → injecting`. All three phases (A/B/C) are now complete.
 
 ### Phase C — done
 

@@ -25,7 +25,7 @@ experimentation.
 |-------|------|-------|
 | **A** | capture → whisper → inject (headless) | ✅ done |
 | **C** | microui/Xlib status GUI (focus-preserving) | ✅ done |
-| **B** | optional GPU LLM cleanup via llama.cpp | ✅ built (live mic check pending) |
+| **B** | optional GPU LLM cleanup via llama.cpp | ✅ done |
 
 ## One-time setup
 
