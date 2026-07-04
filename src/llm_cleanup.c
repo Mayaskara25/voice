@@ -98,6 +98,51 @@ int llm_init(struct llm_context *llm, const char *model_path, int n_threads, int
     return 0;
 }
 
+/* Maps the common non-ASCII typographic punctuation an instruct model may emit
+ * (curly quotes, en/em dashes, ellipsis, non-breaking space) down to plain
+ * ASCII, and drops any other non-ASCII. This matters because the XTest injector
+ * (inject_xtest.c) is ASCII-only and silently skips bytes >0x7E -- without this,
+ * a curly apostrophe would turn "it's" into "its" on injection. Returns a newly
+ * malloc'd ASCII string, or NULL on OOM. */
+static char *normalize_ascii(const char *s)
+{
+    size_t n = strlen(s);
+    char *out = malloc(n * 3 + 1); /* worst case: each byte -> "..." */
+    if (!out)
+        return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < n; ) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x80) { out[o++] = s[i++]; continue; }
+
+        if (c == 0xE2 && i + 2 < n) {
+            unsigned char b1 = (unsigned char)s[i + 1], b2 = (unsigned char)s[i + 2];
+            const char *rep = NULL;
+            if (b1 == 0x80) {
+                switch (b2) {
+                case 0x98: case 0x99: rep = "'";   break; /* ' ' */
+                case 0x9C: case 0x9D: rep = "\"";  break; /* " " */
+                case 0x93: case 0x94: rep = "-";   break; /* en/em dash */
+                case 0xA6:            rep = "...";  break; /* ellipsis */
+                }
+            } else if (b1 == 0x88 && b2 == 0x92) {
+                rep = "-"; /* minus sign U+2212 */
+            }
+            if (rep) { for (const char *r = rep; *r; r++) out[o++] = *r; i += 3; continue; }
+        }
+        if (c == 0xC2 && i + 1 < n && (unsigned char)s[i + 1] == 0xA0) {
+            out[o++] = ' '; i += 2; continue; /* non-breaking space */
+        }
+
+        /* unknown non-ASCII: skip this codepoint's UTF-8 bytes entirely */
+        i++;
+        while (i < n && ((unsigned char)s[i] & 0xC0) == 0x80)
+            i++;
+    }
+    out[o] = '\0';
+    return out;
+}
+
 /* Trims leading/trailing whitespace and one matched pair of wrapping quotes,
  * in place. Returns a pointer within `s` (not reallocated). */
 static char *trim_and_unquote(char *s)
@@ -218,8 +263,10 @@ char *llm_clean(struct llm_context *llm, const char *raw, const char *style_name
     char *trimmed = trim_and_unquote(out);
     if (trimmed[0] == '\0') { free(out); return NULL; }
 
-    char *result = strdup(trimmed);
+    /* Guarantee ASCII output so the ASCII-only injector types it faithfully. */
+    char *result = normalize_ascii(trimmed);
     free(out);
+    if (result && result[0] == '\0') { free(result); return NULL; }
     return result;
 }
 
