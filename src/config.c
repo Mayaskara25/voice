@@ -1,4 +1,5 @@
 #include "config.h"
+#include "llm_cleanup.h"
 #include "log.h"
 
 #include <ctype.h>
@@ -22,6 +23,8 @@ void config_set_defaults(struct app_config *cfg)
     cfg->test_mode = false;
     cfg->gui_enabled = false;
     cfg->gui_font[0] = '\0';
+    snprintf(cfg->cleanup_style, sizeof(cfg->cleanup_style), "dictation");
+    cfg->n_gpu_layers = 99; /* offload all layers to GPU by default (Phase B) */
 }
 
 static char *trim(char *s)
@@ -67,6 +70,10 @@ static void apply_kv(struct app_config *cfg, const char *key, const char *value)
         cfg->gui_enabled = parse_bool(value, cfg->gui_enabled);
     } else if (strcmp(key, "gui_font") == 0) {
         snprintf(cfg->gui_font, sizeof(cfg->gui_font), "%s", value);
+    } else if (strcmp(key, "cleanup_style") == 0) {
+        snprintf(cfg->cleanup_style, sizeof(cfg->cleanup_style), "%s", value);
+    } else if (strcmp(key, "n_gpu_layers") == 0) {
+        cfg->n_gpu_layers = atoi(value);
     } else {
         log_warn("config: unknown key '%s' ignored", key);
     }
@@ -126,9 +133,15 @@ int config_validate(const struct app_config *cfg)
         return -1;
     }
 
-    if (cfg->llama_model_path[0] != '\0' && stat(cfg->llama_model_path, &st) != 0) {
-        log_error("config: llama_model_path '%s' does not exist", cfg->llama_model_path);
-        return -1;
+    if (cfg->llama_model_path[0] != '\0') {
+        if (stat(cfg->llama_model_path, &st) != 0) {
+            log_error("config: llama_model_path '%s' does not exist", cfg->llama_model_path);
+            return -1;
+        }
+        if (!llm_style_is_known(cfg->cleanup_style)) {
+            log_warn("config: unknown cleanup_style '%s', falling back to 'dictation'",
+                     cfg->cleanup_style);
+        }
     }
 
     if (cfg->ptt_device[0] != '\0' && stat(cfg->ptt_device, &st) != 0) {

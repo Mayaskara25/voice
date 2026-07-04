@@ -4,6 +4,7 @@
 #include "hotkey_evdev.h"
 #include "inject_xtest.h"
 #include "ipc_handoff.h"
+#include "llm_cleanup.h"
 #include "log.h"
 #include "stt_whisper.h"
 
@@ -16,6 +17,7 @@
 
 struct pipeline_ctx {
     struct stt_context      *stt;
+    struct llm_context      *llm;   /* NULL = LLM cleanup disabled */
     Display                 *dpy;   /* headless direct-injection target; NULL in test-mode/GUI mode */
     const struct app_config *cfg;
     struct ipc_handoff      *ipc;   /* non-NULL in GUI mode: publish state + hand off injection */
@@ -59,15 +61,19 @@ static void on_ptt_up(void *user_data)
         return;
     }
 
-    /* --- Phase B insertion point (LLM cleanup) ---
-     * When llm_cleanup.c lands, insert here, unchanged around it:
-     *     if (ctx->cfg->llama_model_path[0] != '\0') {
-     *         publish_state(ctx, APP_STATE_CLEANING);
-     *         char *cleaned = llm_clean(ctx->llm, text);
-     *         if (cleaned) { free(text); text = cleaned; }
-     *     }
-     * The GUI already renders APP_STATE_CLEANING, and the handoff already
-     * carries the state -- no threading or GUI change is needed then. */
+    /* Optional LLM cleanup (Phase B). Best-effort: on any failure llm_clean
+     * returns NULL and we keep the raw transcript. GUI already renders CLEANING. */
+    if (ctx->llm) {
+        log_info("pipeline: cleaning up transcript (style=%s)...", ctx->cfg->cleanup_style);
+        publish_state(ctx, APP_STATE_CLEANING);
+        char *cleaned = llm_clean(ctx->llm, text, ctx->cfg->cleanup_style);
+        if (cleaned) {
+            free(text);
+            text = cleaned;
+        } else {
+            log_warn("pipeline: cleanup failed, using raw transcript");
+        }
+    }
 
     if (ctx->cfg->test_mode) {
         printf("%s\n", text);
@@ -121,7 +127,7 @@ static void print_usage(const char *argv0)
 
 /* Runs the headless pipeline: worker thread injects directly, main joins.
  * Identical behavior to Phase A. Returns process exit code. */
-static int run_headless(struct stt_context *stt, struct app_config *cfg)
+static int run_headless(struct stt_context *stt, struct llm_context *llm, struct app_config *cfg)
 {
     Display *dpy = NULL;
     if (!cfg->test_mode) {
@@ -130,7 +136,7 @@ static int run_headless(struct stt_context *stt, struct app_config *cfg)
             return 1;
     }
 
-    struct pipeline_ctx pctx = { .stt = stt, .dpy = dpy, .cfg = cfg, .ipc = NULL };
+    struct pipeline_ctx pctx = { .stt = stt, .llm = llm, .dpy = dpy, .cfg = cfg, .ipc = NULL };
     struct hotkey_thread_args hargs = { .cfg = cfg, .user_data = &pctx };
 
     log_info("dictation: ready (test_mode=%s, gui=false) -- hold your PTT key to dictate",
@@ -151,7 +157,7 @@ static int run_headless(struct stt_context *stt, struct app_config *cfg)
 /* Runs the GUI pipeline: main thread becomes the X/GUI thread (owns Display,
  * renders, injects); worker thread runs the same capture->stt pipeline but
  * publishes state and hands off injection via ipc_handoff. Returns exit code. */
-static int run_gui(struct stt_context *stt, struct app_config *cfg)
+static int run_gui(struct stt_context *stt, struct llm_context *llm, struct app_config *cfg)
 {
     Display *dpy = inject_open_display();
     if (!dpy)
@@ -170,7 +176,7 @@ static int run_gui(struct stt_context *stt, struct app_config *cfg)
         return 1;
     }
 
-    struct pipeline_ctx pctx = { .stt = stt, .dpy = NULL, .cfg = cfg, .ipc = &ipc };
+    struct pipeline_ctx pctx = { .stt = stt, .llm = llm, .dpy = NULL, .cfg = cfg, .ipc = &ipc };
     struct hotkey_thread_args hargs = { .cfg = cfg, .user_data = &pctx };
 
     log_info("dictation: ready (test_mode=%s, gui=true) -- hold your PTT key to dictate",
@@ -238,12 +244,27 @@ int main(int argc, char **argv)
     if (stt_init(&stt, cfg.whisper_model_path, cfg.n_threads) != 0)
         return 1;
 
+    /* Optional LLM cleanup (Phase B): only when a model is configured. Failure
+     * to load is fatal here (misconfiguration) rather than silently skipping. */
+    struct llm_context llm;
+    struct llm_context *llm_ptr = NULL;
+    if (cfg.llama_model_path[0] != '\0') {
+        if (llm_init(&llm, cfg.llama_model_path, cfg.n_threads, cfg.n_gpu_layers) != 0) {
+            stt_free(&stt);
+            return 1;
+        }
+        llm_ptr = &llm;
+    }
+
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
 
-    int ret = cfg.gui_enabled ? run_gui(&stt, &cfg) : run_headless(&stt, &cfg);
+    int ret = cfg.gui_enabled ? run_gui(&stt, llm_ptr, &cfg)
+                              : run_headless(&stt, llm_ptr, &cfg);
 
     log_info("dictation: shutting down");
+    if (llm_ptr)
+        llm_free(llm_ptr);
     stt_free(&stt);
     return ret;
 }

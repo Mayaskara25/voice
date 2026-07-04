@@ -25,7 +25,7 @@ experimentation.
 |-------|------|-------|
 | **A** | capture → whisper → inject (headless) | ✅ done |
 | **C** | microui/Xlib status GUI (focus-preserving) | ✅ done |
-| **B** | optional LLM cleanup via llama.cpp | ⏳ planned (see `PLAN.md`) |
+| **B** | optional GPU LLM cleanup via llama.cpp | ✅ built (live mic check pending) |
 
 ## One-time setup
 
@@ -39,6 +39,23 @@ sudo usermod -aG input $USER                 # then LOG OUT AND BACK IN (newgrp 
 ./whisper.cpp/models/download-ggml-model.sh base.en
 ln -sf ../whisper.cpp/models/ggml-base.en.bin models/ggml-base.en.bin
 ```
+
+### Optional: LLM cleanup (Phase B, GPU)
+
+The transcript can be passed through a local LLM (llama.cpp) to fix casing/punctuation
+before injection. This is **GPU-accelerated** (CUDA) and needs the CUDA toolkit plus a model:
+
+```sh
+sudo apt install -y nvidia-cuda-toolkit          # provides nvcc (needs the NVIDIA driver)
+# download the cleanup model (~1 GB) into models/
+wget -O models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf \
+  https://huggingface.co/bartowski/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf
+```
+
+Then set `llama_model_path` in the config (already set in `example.conf`). To **disable**
+cleanup, leave `llama_model_path` blank — the app then needs no CUDA toolkit and you can build
+CPU-only. `n_gpu_layers=0` runs the model on CPU (much slower). The `llama.cpp` vendored here
+is pinned so its bundled ggml (0.15.3) matches whisper's, letting both share one ggml backend.
 
 ### Microphone gain / capture device (read this — it bit us)
 
@@ -61,12 +78,14 @@ Two non-obvious, machine-specific gotchas found during development (details in `
 ## Build
 
 ```sh
-make            # builds whisper.cpp (CMake sub-build) + the dictation binary
-make test       # runs the unit tests (config parser, self-pipe handoff, whisper on jfk.wav)
+make            # builds whisper.cpp + llama.cpp (CMake sub-builds, CUDA) + the dictation binary
+make test       # unit tests: config parser, self-pipe handoff, whisper on jfk.wav, LLM cleanup
 ```
 
-`make` targets: `all`, `app`, `deps-whisper`, `test`, `run`, `list-keys`, `clean`,
-`distclean` (also removes the slow-to-rebuild vendored `build/` dirs).
+`make` targets: `all`, `app`, `deps-whisper`, `deps-llama`, `test`, `run`, `list-keys`,
+`clean`, `distclean` (also removes the slow-to-rebuild vendored `build/` dirs). The
+`deps-llama` sub-build compiles llama.cpp with `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75`
+(GTX 1650). If you don't want LLM cleanup, you can skip it and leave `llama_model_path` blank.
 
 ## Run
 
@@ -82,7 +101,8 @@ appears in the editor a second or two later. Ctrl-C to quit.
 
 The `--gui` status panel is an **override-redirect** window that never takes input focus, so
 your keystrokes still land in the app you were looking at while the panel shows the pipeline
-state (`idle → recording → transcribing → injecting`).
+state (`idle → recording → transcribing → cleaning → injecting`; `cleaning` appears only when
+LLM cleanup is enabled).
 
 ## Configuration
 
@@ -91,11 +111,13 @@ Key = value, `#` starts a comment (see `configs/example.conf`):
 | Key | Meaning |
 |-----|---------|
 | `whisper_model_path` | path to the ggml whisper model (default `./models/ggml-base.en.bin`) |
-| `llama_model_path` | Phase B only; blank = no LLM cleanup |
+| `llama_model_path` | LLM cleanup model (GGUF); **blank = cleanup disabled** (raw whisper output) |
+| `cleanup_style` | `dictation` (default) / `code` / `commands`; only used when cleanup is on |
+| `n_gpu_layers` | LLM GPU offload: `99` = all layers on GPU, `0` = CPU-only |
 | `ptt_device` | evdev device (e.g. `/dev/input/event3`); blank = auto-detect |
 | `ptt_keycode` | **evdev** key code (from `--list-keys`), *not* an X keysym; default 97 = RIGHTCTRL |
 | `audio_device` | ALSA capture device (e.g. `plughw:2,0`); blank = auto-detect |
-| `n_threads` | whisper CPU threads |
+| `n_threads` | whisper CPU threads (also the LLM's CPU threads) |
 | `language` | fixed `en` for now |
 | `test_mode` | `true` = print instead of inject |
 | `gui_enabled` | `true` = show the status panel |
@@ -110,6 +132,8 @@ Included as flat source (upstream `.git` removed) under MIT licenses:
 
 - `whisper.cpp/` — `v1.9.1-81-g6fc7c33b`
 - `microui/` — `0850aba` (v2.02)
+- `llama.cpp/` — `96183e982` (pinned so its bundled ggml 0.15.3 matches whisper's, so both
+  share one ggml backend; llama's CUDA-enabled ggml serves whisper's CPU path too)
 
 ## Layout
 

@@ -16,6 +16,8 @@ struct app_config {
     bool test_mode;                          /* true: print transcript instead of injecting */
     bool gui_enabled;                        /* true: also run the microui/Xlib status panel (Phase C) */
     char gui_font[CONFIG_PATH_MAX];          /* X core font (XLFD/alias) for the GUI; empty = "fixed" */
+    char cleanup_style[32];                  /* LLM cleanup style: dictation|code|commands (Phase B) */
+    int  n_gpu_layers;                       /* llama GPU offload: 0 = CPU, 99 = all layers (Phase B) */
 };
 
 /* Populates *cfg with defaults, then overrides from the key=value file at path.
