@@ -12,6 +12,7 @@ LLAMA_LIB   := $(LLAMA_BUILD)/src/libllama.a
 
 SRCS := src/main.c src/config.c src/log.c src/hotkey_evdev.c src/audio_alsa.c \
         src/stt_whisper.c src/inject_xtest.c src/llm_cleanup.c \
+        src/dictation_directives.c \
         src/ipc_handoff.c src/font_xlib.c src/gui_xlib.c \
         microui/src/microui.c
 OBJS := $(SRCS:.c=.o)
@@ -19,7 +20,7 @@ OBJS := $(SRCS:.c=.o)
 # Everything except the app entry point, for linking test binaries.
 OBJS_NOMAIN := $(filter-out src/main.o,$(OBJS))
 
-TEST_SRCS := tests/test_config.c tests/test_ipc.c tests/test_stt.c tests/test_llm.c
+TEST_SRCS := tests/test_config.c tests/test_directives.c tests/test_ipc.c tests/test_stt.c tests/test_llm.c
 TEST_BINS := $(TEST_SRCS:.c=)
 
 # One shared ggml: llama's CUDA-enabled 0.15.3 serves BOTH whisper (CPU backend,

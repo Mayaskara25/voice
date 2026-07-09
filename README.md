@@ -102,6 +102,22 @@ currently links llama.cpp + CUDA unconditionally.
 Then: focus any text editor, **hold** the configured PTT key, speak, **release** — the text
 appears in the editor a second or two later. Ctrl-C to quit.
 
+### Spoken per-utterance directives
+
+Say one of these keywords at the start of an utterance to override formatting for just that
+clip:
+
+| Say | Result |
+|-----|--------|
+| `keep all lowercase i am hungry` | types `i am hungry` and skips LLM cleanup |
+| `spell word c o d e x` or `spell c-o-d-e-x` | types `codex` and skips LLM cleanup |
+| `literal codex --help` / `no cleanup codex --help` | types the remaining text without cleanup |
+| `command echo hello` | cleans the remaining text with `cleanup_style=commands` for this utterance |
+| `code mode const name equals codex` | cleans the remaining text with `cleanup_style=code` for this utterance |
+
+Angle-bracket tags such as `<keep all lowercase>` and `<spell>` are also accepted if the
+transcript contains them, but the spoken forms above are the intended workflow.
+
 The `--gui` status panel is an **override-redirect** window that never takes input focus, so
 your keystrokes still land in the app you were looking at while the panel shows the pipeline
 state (`idle → recording → transcribing → cleaning → injecting`; `cleaning` appears only when

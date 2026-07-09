@@ -3,12 +3,16 @@
 
 #include <whisper.h>
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-int stt_init(struct stt_context *stt, const char *model_path, int n_threads, bool use_gpu)
+int stt_init(struct stt_context *stt, const char *model_path, int n_threads, bool use_gpu,
+             const char *initial_prompt)
 {
     memset(stt, 0, sizeof(*stt));
+    if (initial_prompt)
+        snprintf(stt->initial_prompt, sizeof(stt->initial_prompt), "%s", initial_prompt);
 
     struct whisper_context_params cparams = whisper_context_default_params();
     /* GPU offload via the shared ggml CUDA backend (whisper falls back to CPU
@@ -48,6 +52,7 @@ char *stt_transcribe(struct stt_context *stt, const float *samples, size_t n_sam
     wparams.print_special   = false;
     wparams.print_timestamps = false;
     wparams.no_context      = true; /* each PTT clip is transcribed independently */
+    wparams.initial_prompt  = stt->initial_prompt[0] ? stt->initial_prompt : NULL;
 
     int rc = whisper_full(stt->whisper_ctx, wparams, samples, (int)n_samples);
     if (rc != 0) {

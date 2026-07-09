@@ -81,7 +81,7 @@ int main(void)
     bool use_gpu = true;
     const char *g = getenv("DICT_TEST_GPU");
     if (g && atoi(g) == 0) use_gpu = false;
-    if (stt_init(&stt, MODEL_PATH, 4, use_gpu) != 0) {
+    if (stt_init(&stt, MODEL_PATH, 4, use_gpu, NULL) != 0) {
         fprintf(stderr, "test_stt: FAIL stt_init\n");
         free(samples);
         return 1;

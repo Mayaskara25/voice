@@ -1,5 +1,6 @@
 #include "audio_alsa.h"
 #include "config.h"
+#include "dictation_directives.h"
 #include "gui_xlib.h"
 #include "hotkey_evdev.h"
 #include "inject_xtest.h"
@@ -61,12 +62,28 @@ static void on_ptt_up(void *user_data)
         return;
     }
 
+    log_info("pipeline: raw transcript: '%s'", text);
+
+    struct dictation_directive_result directive;
+    if (dictation_directives_apply(text, &directive) == 0) {
+        free(text);
+        text = directive.text;
+        directive.text = NULL;
+    } else {
+        log_warn("pipeline: directive parsing failed, using raw transcript");
+        memset(&directive, 0, sizeof(directive));
+        directive.cleanup_override = DICTATION_CLEANUP_DEFAULT;
+    }
+
     /* Optional LLM cleanup (Phase B). Best-effort: on any failure llm_clean
      * returns NULL and we keep the raw transcript. GUI already renders CLEANING. */
-    if (ctx->llm) {
-        log_info("pipeline: cleaning up transcript (style=%s)...", ctx->cfg->cleanup_style);
+    if (ctx->llm && directive.cleanup_override != DICTATION_CLEANUP_SKIP) {
+        const char *cleanup_style = directive.cleanup_override == DICTATION_CLEANUP_STYLE
+                                  ? directive.cleanup_style
+                                  : ctx->cfg->cleanup_style;
+        log_info("pipeline: cleaning up transcript (style=%s)...", cleanup_style);
         publish_state(ctx, APP_STATE_CLEANING);
-        char *cleaned = llm_clean(ctx->llm, text, ctx->cfg->cleanup_style);
+        char *cleaned = llm_clean(ctx->llm, text, cleanup_style);
         if (cleaned) {
             free(text);
             text = cleaned;
@@ -74,6 +91,7 @@ static void on_ptt_up(void *user_data)
             log_warn("pipeline: cleanup failed, using raw transcript");
         }
     }
+    dictation_directives_free(&directive);
 
     if (ctx->cfg->test_mode) {
         printf("%s\n", text);
@@ -241,7 +259,8 @@ int main(int argc, char **argv)
         return 1;
 
     struct stt_context stt;
-    if (stt_init(&stt, cfg.whisper_model_path, cfg.n_threads, cfg.whisper_use_gpu) != 0)
+    if (stt_init(&stt, cfg.whisper_model_path, cfg.n_threads, cfg.whisper_use_gpu,
+                 cfg.whisper_initial_prompt) != 0)
         return 1;
 
     /* Optional LLM cleanup (Phase B): only when a model is configured. Failure

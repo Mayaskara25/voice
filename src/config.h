@@ -14,6 +14,7 @@ struct app_config {
     int  n_threads;
     bool whisper_use_gpu;                    /* true: offload whisper to the GPU (else CPU) */
     char language[8];
+    char whisper_initial_prompt[256];        /* biases whisper toward this vocabulary/phrasing; empty = none */
     bool test_mode;                          /* true: print transcript instead of injecting */
     bool gui_enabled;                        /* true: also run the microui/Xlib status panel (Phase C) */
     char gui_font[CONFIG_PATH_MAX];          /* X core font (XLFD/alias) for the GUI; empty = "fixed" */
