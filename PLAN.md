@@ -233,6 +233,66 @@ Each phase ends with an explicit end-to-end manual test (described per-phase abo
 
 ## Progress log
 
+### Phase D4 — daemon start/stop from the window (done)
+
+- **Start/Stop shell out to `scripts/waybar-dictation.sh`**, never reimplemented. That script
+  already owns the mandatory `cd "$DICT_DIR"` (without which every relative model path breaks),
+  the `nohup` detach, the log file and the Waybar refresh signal; a second launcher in C could
+  disagree with it about process identity, which is by executable name (`pgrep -x dictation`).
+  Because this binary is named `dictation-setup`, that `pgrep` never matches it and the script
+  needed no identity changes at all.
+- **State comes from the script's own `status` JSON**, substring-matched on the fully-quoted
+  `"class":"active"` / `"loading"` / `"notactive"` forms. Note `"notactive"` contains `active`,
+  but `"class":"active"` is not a substring of `"class":"notactive"` — the quote disambiguates,
+  which is why the quotes are part of the pattern rather than incidental.
+- **Nothing blocks the render loop.** `status` is a `pgrep` plus a `grep`, so it is captured
+  synchronously through a pipe; `start`/`stop` are **double-forked** so the grandchild is
+  reparented to init and never waited on — the script's `stop` polls for up to 5 s for the daemon
+  to exit, which would otherwise freeze the window solid. The intermediate child is reaped with
+  `waitpid(WNOHANG)` on the tick, not in the click handler, and always by explicit pid so it can
+  never steal curl's child out from under `download_reap`.
+- **Poll cadence**: 1 s normally, 300 ms while `loading` so the transition is visible. The window
+  therefore stops being purely event-driven, which is deliberate: the daemon's state changes
+  behind its back whenever the user presses **Super+D**, and a status line that only updates on
+  mouse movement would be wrong more often than right. Verified: starting the daemon from a
+  terminal while the window sat idle flipped it to "Stop dictation / daemon: ready" on its own.
+- **The window now chdir's to the project directory at startup** (resolved from `/proc/self/exe`,
+  and *only* if that directory actually contains `scripts/waybar-dictation.sh`; `--dir PATH`
+  overrides). This is D5 insurance as much as D4 plumbing: a `.desktop` launcher starts a process
+  with `cwd=$HOME`, which would have put `configs/local.conf` in the user's home directory and
+  found no catalog at all. A copy installed in `/usr/local/bin` fails the probe and leaves cwd
+  alone rather than doing something worse. (The probe is exactly "is there a `scripts/` next to
+  the resolved executable" — nothing more general. A symlink from `~/bin` into the repo resolves
+  to the repo and chdirs there, which is the wanted outcome, but this does not detect installed
+  copies in the abstract.) Verified by running `--list` from `/tmp`.
+- **`scripts/waybar-dictation.sh`: `DICT_CONF` now prefers `configs/local.conf` when it exists** —
+  the follow-up carried since D1, and the one edit in this phase that could break a daily driver.
+  All four states were checked with `bash -x` rather than by reading the diff: absent → resolves
+  to `example.conf` (today's behaviour, unchanged), present → resolves to `local.conf`, `bash -n`
+  clean, and `status` prints byte-identical JSON. Written as an explicit `if` block rather than
+  `[ -f … ] && DICT_CONF=…`, which under `set -uo pipefail` would return nonzero if it ever ended
+  a function. A daemon started from the script and a bare `./dictation` now always agree on which
+  config they read.
+- **Stop is never gated**; Start keeps its gate on the selected whisper model being present, and
+  both are disabled with the reason shown if the launcher script isn't found. That disabled path
+  was rendered and clicked, not just reasoned about — `--dir` pointed at a directory with no
+  `scripts/`, the row read "scripts/waybar-dictation.sh not found -- Start/Stop unavailable", and
+  clicking the button started nothing. It is the path a `.desktop`-launched installed copy hits,
+  so D5 will meet it first.
+- **Verified live**, real script and real daemon: pressing **Start** in the window walked
+  `daemon: not running → loading models... → ready` (screenshots at each step), `pgrep -x
+  dictation` showed the daemon, the button label swapped to **Stop dictation**, and the exact
+  command run was echoed into the log pane. **Stop** ended it within ~1.5 s and the label swapped
+  back. No zombies under the setup process, and the daemon was left **stopped**, as it was found.
+- Not verified here (needs a physical keypress): pressing **Super+D** while the setup window is
+  open. The mechanism is the same one exercised above — the keybind calls the same script, and the
+  window merely polls its `status` — but the keypress itself is the user's to make.
+- **Deliberately not done**: tailing the daemon's `$LOG_FILE` into the output pane. It would be
+  genuinely useful for diagnosing a failed start, but D4's contract is the readiness state, and
+  that comes from the script. Worth considering alongside D5.
+- `make test` still runs all ten suites green, and no file in `SRCS` changed, so the `dictation`
+  binary is untouched by this phase.
+
 ### Phase D3 — the setup window (done)
 
 - **`src/setup_gui.{h,c}`**: WM-managed microui/Xlib window, ~700 lines, a sibling of

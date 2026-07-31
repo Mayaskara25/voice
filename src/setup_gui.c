@@ -1,3 +1,6 @@
+/* pipe2(): a GNU extension, used so the status pipe is O_CLOEXEC atomically. */
+#define _GNU_SOURCE
+
 #include "setup_gui.h"
 #include "config.h"
 #include "config_write.h"
@@ -6,12 +9,15 @@
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define SETUP_WIDTH   560
@@ -227,6 +233,161 @@ static int service_download(struct setup_gui *g)
     return 1;
 }
 
+/* ------------------------------------------------------------ daemon control */
+
+/* Poll cadence. Faster while models load so the status line tracks the
+ * transition; slow otherwise, since the only thing that changes it is the user
+ * pressing Super+D behind our back. */
+#define DAEMON_POLL_MS       1000
+#define DAEMON_POLL_FAST_MS   300
+
+static const char *daemon_state_text(enum daemon_state s)
+{
+    switch (s) {
+    case DAEMON_STOPPED: return "not running";
+    case DAEMON_LOADING: return "loading models...";
+    case DAEMON_READY:   return "ready";
+    default:             return "unknown";
+    }
+}
+
+/* Runs `<script> <arg>` and captures its stdout. Blocking, but only ever used
+ * for `status`, which is a pgrep plus a grep -- `start`/`stop` go through
+ * daemon_action() instead, because the script's `stop` waits up to 5s for the
+ * daemon to exit and that must never freeze the render loop. */
+static int run_script_capture(const char *script, const char *arg, char *buf, size_t n)
+{
+    int fds[2];
+    if (pipe2(fds, O_CLOEXEC) != 0)
+        return -1;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        close(fds[0]);
+        if (dup2(fds[1], STDOUT_FILENO) < 0)
+            _exit(127);
+        if (fds[1] != STDOUT_FILENO)
+            close(fds[1]);
+        /* stderr is left alone so script errors surface in the terminal. */
+        execl(script, script, arg, (char *)NULL);
+        _exit(127);
+    }
+
+    close(fds[1]);              /* before reading, or EOF never arrives */
+
+    size_t len = 0;
+    while (len < n - 1) {
+        ssize_t got = read(fds[0], buf + len, n - 1 - len);
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got <= 0)
+            break;
+        len += (size_t)got;
+    }
+    buf[len] = '\0';
+    close(fds[0]);
+
+    int status;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+        ;
+    return 0;
+}
+
+/* Returns 1 if the displayed state changed. */
+static int poll_daemon(struct setup_gui *g)
+{
+    if (!g->script_ok)
+        return 0;
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long ms = (now.tv_sec - g->last_poll.tv_sec) * 1000 +
+              (now.tv_nsec - g->last_poll.tv_nsec) / 1000000;
+    long want = (g->daemon == DAEMON_LOADING) ? DAEMON_POLL_FAST_MS : DAEMON_POLL_MS;
+    if (g->last_poll.tv_sec != 0 && ms < want)
+        return 0;
+    g->last_poll = now;
+
+    enum daemon_state prev = g->daemon;
+    char out[512];
+    if (run_script_capture(g->script_path, "status", out, sizeof(out)) != 0)
+        g->daemon = DAEMON_UNKNOWN;
+    /* Match the fully-quoted forms: "notactive" contains "active", but
+     * `"class":"active"` is not a substring of `"class":"notactive"`. */
+    else if (strstr(out, "\"class\":\"active\""))
+        g->daemon = DAEMON_READY;
+    else if (strstr(out, "\"class\":\"loading\""))
+        g->daemon = DAEMON_LOADING;
+    else if (strstr(out, "\"class\":\"notactive\""))
+        g->daemon = DAEMON_STOPPED;
+    else
+        g->daemon = DAEMON_UNKNOWN;
+
+    return g->daemon != prev;
+}
+
+/* Fire-and-forget `<script> start|stop`. Double-forks so the grandchild is
+ * reparented to init: `stop` can take seconds, and nothing here may block. */
+static void daemon_action(struct setup_gui *g, const char *arg)
+{
+    if (!g->script_ok)
+        return;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        snprintf(g->status, sizeof(g->status), "fork failed -- could not %s the daemon", arg);
+        return;
+    }
+    if (pid == 0) {
+        pid_t grandchild = fork();
+        if (grandchild == 0) {
+            execl(g->script_path, g->script_path, arg, (char *)NULL);
+            _exit(127);
+        }
+        _exit(grandchild < 0 ? 1 : 0);
+    }
+
+    /* Reaped with WNOHANG on the tick, not waited on here: a blocking wait in
+     * a click handler is a frozen window if anything goes wrong. */
+    g->pending_action = pid;
+    g->last_poll.tv_sec = 0;    /* re-poll status on the next tick */
+    snprintf(g->status, sizeof(g->status), "running: waybar-dictation.sh %s", arg);
+    logf_append(g, "\n$ %s %s\n", g->script_path, arg);
+}
+
+static void reap_pending_action(struct setup_gui *g)
+{
+    if (!g->pending_action)
+        return;
+    int status;
+    pid_t got = waitpid(g->pending_action, &status, WNOHANG);
+    if (got == g->pending_action || (got < 0 && errno != EINTR))
+        g->pending_action = 0;
+}
+
+/* The launcher script is the one the Super+D keybind and Waybar already use;
+ * reimplementing start/stop in C would create a second launcher that could
+ * disagree with it about process identity. Located relative to the project
+ * directory, and everything daemon-related is disabled (with the reason shown)
+ * if it isn't there. */
+static void find_script(struct setup_gui *g, const char *project_dir)
+{
+    int n = snprintf(g->script_path, sizeof(g->script_path),
+                     "%s/scripts/waybar-dictation.sh", project_dir);
+    if (n < 0 || (size_t)n >= sizeof(g->script_path) || access(g->script_path, X_OK) != 0) {
+        g->script_ok = 0;
+        log_warn("setup: '%s' not executable -- Start/Stop disabled", g->script_path);
+        return;
+    }
+    g->script_ok = 1;
+    log_info("setup: launcher script %s", g->script_path);
+}
+
 /* ------------------------------------------------------------------ drawing */
 
 static unsigned long alloc_pixel(struct setup_gui *g, mu_Color c)
@@ -386,14 +547,35 @@ static void render(struct setup_gui *g)
         mu_end_panel(ctx);
 
         int can_start = g->sel_whisper >= 0 && g->cat->e[g->sel_whisper].present;
+        int is_up = (g->daemon == DAEMON_READY || g->daemon == DAEMON_LOADING);
 
         mu_layout_row(ctx, 2, (int[]){ 150, -1 }, 0);
-        int opt = MU_OPT_ALIGNCENTER | (can_start ? 0 : MU_OPT_NOINTERACT);
-        if (mu_button_ex(ctx, "Start dictation", 0, opt) && can_start)
-            snprintf(g->status, sizeof(g->status),
-                     "not wired yet (D4) -- run: scripts/waybar-dictation.sh start");
-        mu_label(ctx, can_start ? "ready to start"
-                                : "select a whisper model and Get it first");
+        if (is_up) {
+            /* Stop is never gated: whatever state the config is in, the user
+             * must always be able to shut the daemon down. */
+            if (mu_button(ctx, "Stop dictation"))
+                daemon_action(g, "stop");
+        } else {
+            /* Gated, because local.conf is seeded from example.conf, which
+             * names models a fresh clone doesn't have. An ungated Start would
+             * hand the user config_validate's fatal error -- exactly the
+             * failure this phase exists to remove -- from behind a button. */
+            int opt = MU_OPT_ALIGNCENTER |
+                      ((can_start && g->script_ok) ? 0 : MU_OPT_NOINTERACT);
+            if (mu_button_ex(ctx, "Start dictation", 0, opt) && can_start && g->script_ok)
+                daemon_action(g, "start");
+        }
+
+        char why[192];
+        if (!g->script_ok)
+            snprintf(why, sizeof(why), "scripts/waybar-dictation.sh not found -- "
+                                       "Start/Stop unavailable");
+        else if (!is_up && !can_start)
+            snprintf(why, sizeof(why), "daemon: %s -- Start needs the selected whisper model",
+                     daemon_state_text(g->daemon));
+        else
+            snprintf(why, sizeof(why), "daemon: %s", daemon_state_text(g->daemon));
+        mu_label(ctx, why);
 
         mu_layout_row(ctx, 1, (int[]){ -1 }, 0);
         mu_label(ctx, g->status);
@@ -517,7 +699,8 @@ static int handle_x_event(struct setup_gui *g, XEvent *ev)
 /* --------------------------------------------------------------- lifecycle */
 
 int setup_gui_init(struct setup_gui *g, Display *dpy, struct model_catalog *cat,
-                   const char *models_dir, const char *font_xlfd)
+                   const char *models_dir, const char *font_xlfd,
+                   const char *project_dir)
 {
     memset(g, 0, sizeof(*g));
     g->dpy        = dpy;
@@ -589,6 +772,7 @@ int setup_gui_init(struct setup_gui *g, Display *dpy, struct model_catalog *cat,
     g->ctx->style->size.y = 16;
 
     preselect_from_config(g);
+    find_script(g, project_dir);
     snprintf(g->status, sizeof(g->status), "pick a model; missing ones download with [Get]");
 
     XMapWindow(dpy, g->win);
@@ -615,6 +799,8 @@ int setup_gui_run(struct setup_gui *g)
         }
 
         need_render |= service_download(g);
+        reap_pending_action(g);
+        need_render |= poll_daemon(g);
 
         if (need_render)
             render(g);
@@ -633,10 +819,17 @@ int setup_gui_run(struct setup_gui *g)
             nfds = 2;
         }
 
-        /* The one change from the status panel's purely event-driven loop: the
+        /* The change from the status panel's purely event-driven loop: the
          * progress bar is computed by re-stat()ing the .part file, so it has to
-         * tick even when curl emits nothing between meter updates. */
-        int rc = poll(fds, nfds, g->dl_active ? 250 : -1);
+         * tick even when curl emits nothing between meter updates -- and the
+         * daemon's state can change behind our back (Super+D), so that needs a
+         * tick too. Fully event-driven only when neither applies. */
+        int timeout = -1;
+        if (g->dl_active)
+            timeout = 250;
+        else if (g->script_ok)
+            timeout = (g->daemon == DAEMON_LOADING) ? DAEMON_POLL_FAST_MS : DAEMON_POLL_MS;
+        int rc = poll(fds, nfds, timeout);
         if (rc < 0) {
             if (errno == EINTR)
                 continue;

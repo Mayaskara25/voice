@@ -8,6 +8,8 @@
 #include <X11/Xlib.h>
 #include <microui.h>
 #include <stddef.h>
+#include <sys/types.h>
+#include <time.h>
 
 /* The model-picker window (Phase D3).
  *
@@ -37,6 +39,17 @@
  * scrolling back through what curl printed. */
 #define SETUP_LOG_CAP  (64 * 1024)
 #define SETUP_LOG_VIEW (8 * 1024)
+
+/* Daemon state, read from scripts/waybar-dictation.sh's status JSON rather than
+ * probed directly -- that script is the tested launcher Waybar and the Super+D
+ * keybind already use, and a second implementation could disagree with it about
+ * process identity (which is by executable name, `pgrep -x dictation`). */
+enum daemon_state {
+    DAEMON_UNKNOWN,     /* the script could not be run, or said something new */
+    DAEMON_STOPPED,     /* "notactive" */
+    DAEMON_LOADING,     /* "loading"  -- running, models not on the GPU yet */
+    DAEMON_READY        /* "active"   -- logged "dictation: ready" */
+};
 
 struct setup_gui {
     Display *dpy;
@@ -71,13 +84,21 @@ struct setup_gui {
 
     char status[192];
     int  running;
+
+    /* daemon control (D4) */
+    char  script_path[CONFIG_PATH_MAX];   /* <project>/scripts/waybar-dictation.sh */
+    int   script_ok;                      /* 0 disables Start/Stop, with a reason shown */
+    enum daemon_state daemon;
+    struct timespec   last_poll;
+    pid_t pending_action;                 /* intermediate child of a start/stop; 0 = none */
 };
 
 /* Creates the window, backbuffer, GC, font and mu_Context, and pre-selects
  * whatever the current config already points at. `dpy` and `cat` are borrowed.
  * `font_xlfd` may be NULL/empty for the default. Returns 0, or -1 logged. */
 int  setup_gui_init(struct setup_gui *g, Display *dpy, struct model_catalog *cat,
-                    const char *models_dir, const char *font_xlfd);
+                    const char *models_dir, const char *font_xlfd,
+                    const char *project_dir);
 
 /* Runs the poll() loop over the X connection plus, while a download is live,
  * curl's pipe. Returns 0 on a normal exit (Esc, the WM close button, or

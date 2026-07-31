@@ -11,7 +11,14 @@ set -uo pipefail
 
 DICT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DICT_BIN="$DICT_DIR/dictation"
+# Prefer the config dictation-setup writes (Phase D), falling back to the
+# tracked example when it has never been run. Matches config_default_path() in
+# src/config_write.c, so a daemon started from here and a bare ./dictation
+# always read the same file.
 DICT_CONF="$DICT_DIR/configs/example.conf"
+if [ -f "$DICT_DIR/configs/local.conf" ]; then
+    DICT_CONF="$DICT_DIR/configs/local.conf"
+fi
 LOG_FILE="${XDG_RUNTIME_DIR:-/tmp}/dictation.log"
 WAYBAR_SIGNAL=8   # must match the "signal" set on custom/dictation in modules.json
 

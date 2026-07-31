@@ -49,12 +49,15 @@ static void print_usage(const char *argv0)
         "  --catalog PATH     model catalog (default: %s)\n"
         "  --models-dir DIR   where models are stored (default: %s)\n"
         "  --font XLFD        X core font for the window (default: 9x15)\n"
+        "  --dir PATH         project directory to work in (default: the one holding\n"
+        "                     this binary, if it has a scripts/ directory)\n"
         "  --list             print the catalog with present/missing status, then exit\n"
         "  --fetch-model ID   download that catalog entry, then exit\n"
         "  -h, --help         this message\n"
         "\n"
-        "Paths are relative to the current directory, like the daemon's: run this\n"
-        "from the project directory.\n",
+        "Relative paths resolve against the project directory, which this binary\n"
+        "changes into at startup (see --dir) -- the same cd the launcher script does\n"
+        "before starting the daemon.\n",
         argv0, DEFAULT_CATALOG, DEFAULT_MODELS_DIR);
 }
 
@@ -181,9 +184,42 @@ static int fetch_model(const struct model_catalog *c, const char *id)
     return 0;
 }
 
+/* Every path this tool touches -- the catalog, models/, configs/local.conf, the
+ * launcher script -- is relative to the project directory, exactly as the
+ * daemon's are (scripts/waybar-dictation.sh cd's there before exec'ing it). But
+ * a .desktop launcher (D5) starts us with cwd=$HOME, which would put
+ * configs/local.conf in the wrong place entirely. So resolve the project
+ * directory from /proc/self/exe and chdir there.
+ *
+ * Only when it really looks like the project, though: an installed copy at
+ * /usr/local/bin has no scripts/ next to it, and chdir'ing there would be
+ * worse than doing nothing. Writes the resolved directory into `out`. */
+static int resolve_project_dir(char *out, size_t n)
+{
+    char exe[CONFIG_PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    if (len <= 0)
+        return -1;
+    exe[len] = '\0';
+
+    char *slash = strrchr(exe, '/');
+    if (!slash)
+        return -1;
+    *slash = '\0';
+
+    char probe[CONFIG_PATH_MAX];
+    int w = snprintf(probe, sizeof(probe), "%s/scripts/waybar-dictation.sh", exe);
+    if (w < 0 || (size_t)w >= sizeof(probe) || access(probe, F_OK) != 0)
+        return -1;
+
+    w = snprintf(out, n, "%s", exe);
+    return (w < 0 || (size_t)w >= n) ? -1 : 0;
+}
+
 /* Opens the window. Separate from main() so the catalog teardown below stays in
  * one place. Returns the process exit code. */
-static int run_window(struct model_catalog *catalog, const char *models_dir, const char *font)
+static int run_window(struct model_catalog *catalog, const char *models_dir, const char *font,
+                      const char *project_dir)
 {
     Display *dpy = XOpenDisplay(NULL);
     if (!dpy) {
@@ -194,7 +230,7 @@ static int run_window(struct model_catalog *catalog, const char *models_dir, con
     }
 
     struct setup_gui gui;
-    if (setup_gui_init(&gui, dpy, catalog, models_dir, font) != 0) {
+    if (setup_gui_init(&gui, dpy, catalog, models_dir, font, project_dir) != 0) {
         XCloseDisplay(dpy);
         return 1;
     }
@@ -211,6 +247,7 @@ int main(int argc, char **argv)
     const char *models_dir = DEFAULT_MODELS_DIR;
     const char *fetch_id = NULL;
     const char *font = NULL;
+    const char *dir_override = NULL;
     bool list_only = false;
 
     for (int i = 1; i < argc; i++) {
@@ -222,6 +259,8 @@ int main(int argc, char **argv)
             fetch_id = argv[++i];
         } else if (strcmp(argv[i], "--font") == 0 && i + 1 < argc) {
             font = argv[++i];
+        } else if (strcmp(argv[i], "--dir") == 0 && i + 1 < argc) {
+            dir_override = argv[++i];
         } else if (strcmp(argv[i], "--list") == 0) {
             list_only = true;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -240,6 +279,26 @@ int main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
     signal(SIGINT, on_sigint);
 
+    /* chdir before anything reads a relative path. */
+    char project_dir[CONFIG_PATH_MAX];
+    if (dir_override) {
+        snprintf(project_dir, sizeof(project_dir), "%s", dir_override);
+    } else if (resolve_project_dir(project_dir, sizeof(project_dir)) != 0) {
+        /* Not next to a scripts/ directory: stay where we are and let the
+         * relative defaults resolve against the current directory, the way the
+         * D2 CLI always has. */
+        project_dir[0] = '\0';
+    }
+    if (project_dir[0] != '\0') {
+        if (chdir(project_dir) != 0) {
+            log_error("setup: cannot chdir to '%s': %s", project_dir, strerror(errno));
+            return 1;
+        }
+        log_info("setup: working directory %s", project_dir);
+    } else if (!getcwd(project_dir, sizeof(project_dir))) {
+        project_dir[0] = '\0';
+    }
+
     struct model_catalog catalog;
     if (catalog_load(&catalog, catalog_path) != 0)
         return 1;
@@ -254,7 +313,7 @@ int main(int argc, char **argv)
         printf("fetch a missing model with: %s --fetch-model <id>\n", argv[0]);
         rc = 0;
     } else {
-        rc = run_window(&catalog, models_dir, font);
+        rc = run_window(&catalog, models_dir, font, project_dir);
     }
 
     catalog_free(&catalog);
