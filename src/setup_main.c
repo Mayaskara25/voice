@@ -1,9 +1,10 @@
 /* dictation-setup: model picker / downloader for the dictation daemon.
  *
- * Phase D2 ships the headless half only -- `--list` and `--fetch-model` -- so
- * the fork/exec/pipe/CR-translation work is exercised from a terminal, with no
- * window in the way, before D3 puts a microui/Xlib front end on top of exactly
- * these calls. (Same discipline Phase A used to validate stt_whisper.c standalone.)
+ * Opens the microui/Xlib setup window (D3) by default; `--list` and
+ * `--fetch-model` (D2) stay as headless equivalents, which is how the
+ * fork/exec/pipe/CR-translation work was exercised from a terminal before any
+ * window existed. (Same discipline Phase A used to validate stt_whisper.c
+ * standalone.) They remain useful over ssh and for scripting.
  *
  * Deliberately a separate binary from `dictation`: scripts/waybar-dictation.sh
  * identifies the daemon by executable name (`pgrep -x dictation`), so a setup
@@ -16,7 +17,9 @@
 #include "downloader.h"
 #include "log.h"
 #include "model_catalog.h"
+#include "setup_gui.h"
 
+#include <X11/Xlib.h>
 #include <errno.h>
 #include <poll.h>
 #include <signal.h>
@@ -35,15 +38,18 @@ static void on_sigint(int sig)
 {
     (void)sig;
     g_interrupted = 1;
+    setup_gui_request_stop();   /* no-op unless the window is running */
 }
 
 static void print_usage(const char *argv0)
 {
     fprintf(stderr,
         "usage: %s [--catalog PATH] [--models-dir DIR] [--list] [--fetch-model ID]\n"
+        "  (no arguments)     open the setup window\n"
         "  --catalog PATH     model catalog (default: %s)\n"
         "  --models-dir DIR   where models are stored (default: %s)\n"
-        "  --list             print the catalog with present/missing status (default)\n"
+        "  --font XLFD        X core font for the window (default: 9x15)\n"
+        "  --list             print the catalog with present/missing status, then exit\n"
         "  --fetch-model ID   download that catalog entry, then exit\n"
         "  -h, --help         this message\n"
         "\n"
@@ -175,11 +181,37 @@ static int fetch_model(const struct model_catalog *c, const char *id)
     return 0;
 }
 
+/* Opens the window. Separate from main() so the catalog teardown below stays in
+ * one place. Returns the process exit code. */
+static int run_window(struct model_catalog *catalog, const char *models_dir, const char *font)
+{
+    Display *dpy = XOpenDisplay(NULL);
+    if (!dpy) {
+        log_error("setup: cannot open an X display (DISPLAY=%s) -- use --list and "
+                  "--fetch-model for a headless setup",
+                  getenv("DISPLAY") ? getenv("DISPLAY") : "unset");
+        return 1;
+    }
+
+    struct setup_gui gui;
+    if (setup_gui_init(&gui, dpy, catalog, models_dir, font) != 0) {
+        XCloseDisplay(dpy);
+        return 1;
+    }
+
+    setup_gui_run(&gui);
+    setup_gui_destroy(&gui);
+    XCloseDisplay(dpy);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *catalog_path = DEFAULT_CATALOG;
     const char *models_dir = DEFAULT_MODELS_DIR;
     const char *fetch_id = NULL;
+    const char *font = NULL;
+    bool list_only = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--catalog") == 0 && i + 1 < argc) {
@@ -188,8 +220,10 @@ int main(int argc, char **argv)
             models_dir = argv[++i];
         } else if (strcmp(argv[i], "--fetch-model") == 0 && i + 1 < argc) {
             fetch_id = argv[++i];
+        } else if (strcmp(argv[i], "--font") == 0 && i + 1 < argc) {
+            font = argv[++i];
         } else if (strcmp(argv[i], "--list") == 0) {
-            /* the default action; accepted so it can be stated explicitly */
+            list_only = true;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -214,11 +248,13 @@ int main(int argc, char **argv)
     int rc;
     if (fetch_id) {
         rc = fetch_model(&catalog, fetch_id);
-    } else {
+    } else if (list_only) {
         print_catalog(&catalog);
         printf("\nconfig: %s\n", config_default_path());
         printf("fetch a missing model with: %s --fetch-model <id>\n", argv[0]);
         rc = 0;
+    } else {
+        rc = run_window(&catalog, models_dir, font);
     }
 
     catalog_free(&catalog);

@@ -30,7 +30,9 @@ OBJS := $(SRCS:.c=.o)
 OBJS_NOMAIN := $(filter-out src/main.o,$(OBJS))
 
 # Compiled into dictation-setup (and its tests) but never into the daemon.
-SETUP_ONLY_SRCS := src/downloader.c
+# font_xlib.c and microui.c are deliberately NOT here: they are already in SRCS,
+# and listing the same object twice on a link line is a duplicate-symbol error.
+SETUP_ONLY_SRCS := src/downloader.c src/setup_gui.c
 SETUP_ONLY_OBJS := $(SETUP_ONLY_SRCS:.c=.o)
 
 # Test binaries link the daemon's objects plus the setup-only ones, so a test
@@ -44,14 +46,16 @@ OBJS_TEST := $(OBJS_NOMAIN) $(SETUP_ONLY_OBJS)
 # before sitting through the ~10-minute CUDA dependency build. Keep it that way:
 # nothing here may pull in whisper.cpp, llama.cpp or CUDA.
 SETUP_BIN  := dictation-setup
-SETUP_SRCS := src/setup_main.c src/downloader.c src/model_catalog.c src/config_write.c \
-              src/config.c src/llm_styles.c src/log.c
+SETUP_SRCS := src/setup_main.c src/setup_gui.c src/downloader.c src/model_catalog.c \
+              src/config_write.c src/config.c src/llm_styles.c src/log.c \
+              src/font_xlib.c microui/src/microui.c
 SETUP_OBJS := $(SETUP_SRCS:.c=.o)
-# D3 adds -lX11 here along with the window; nothing needs a library yet.
-SETUP_LDLIBS :=
+# -lX11 only: no whisper, no llama, no CUDA, and no -lcurl (curl is a child
+# process, not a link dependency).
+SETUP_LDLIBS := -lX11
 
 TEST_SRCS := tests/test_config.c tests/test_config_write.c tests/test_catalog.c \
-             tests/test_download.c \
+             tests/test_download.c tests/test_setup.c \
              tests/test_directives.c tests/test_ipc.c tests/test_stt.c tests/test_llm.c tests/test_inject.c
 TEST_BINS := $(TEST_SRCS:.c=)
 

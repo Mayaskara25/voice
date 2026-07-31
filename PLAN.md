@@ -233,6 +233,97 @@ Each phase ends with an explicit end-to-end manual test (described per-phase abo
 
 ## Progress log
 
+### Phase D3 — the setup window (done)
+
+- **`src/setup_gui.{h,c}`**: WM-managed microui/Xlib window, ~700 lines, a sibling of
+  `gui_xlib.c` rather than an edit of it. `gui_xlib.c` is untouched, so the focus-preserving
+  status panel cannot regress. `dictation-setup` with no arguments now opens the window; `--list`
+  and `--fetch-model` stay as the headless D2 equivalents (still useful over ssh), and a missing
+  `$DISPLAY` says so and points at them instead of aborting inside Xlib.
+- **Inversions from the panel, all as planned**: `override_redirect` False (verified WM-managed —
+  the window appears in `_NET_CLIENT_LIST`), `WM_DELETE_WINDOW` handled, `KeyPressMask` for
+  Esc-only, `XStoreName` + `XSetClassHint`. Confirmed with `xprop`:
+  `WM_CLASS = "dictation-setup", "Dictation"` — the `res_class` D5's `StartupWMClass` must match.
+- **Three bugs found by actually running it**, none of which a unit test would have caught:
+  1. **The microui container never followed the X window.** `mu_begin_window_ex` applies its rect
+     only on first use (`if (cnt->rect.w == 0)` in microui.c), so the content stayed 560x640
+     forever. This is not a corner case: Hyprland is tiling and resized the window to 926x472 on
+     map, leaving the content in a corner with the whole footer cut off. Fixed by re-asserting
+     `mu_get_container(ctx, SETUP_TITLE)->rect` every frame.
+  2. **`0x1000000` truncates to 0 in an `XRectangle`.** microui's "no clip" sentinel is
+     `{0, 0, 0x1000000, 0x1000000}` (microui.c:50), and the rasterizer copied from `gui_xlib.c`
+     narrows `w`/`h` into `unsigned short` — giving a **0x0 clip that silently discards every
+     later draw**. `mu_draw_text` emits that sentinel to restore the clip after any
+     partially-clipped string, so with a scrolling log pane it fired on nearly every frame: the
+     curl output and the entire footer vanished. Found by dumping the command stream after the
+     symptom survived a forced redraw. Fixed by clamping the clip to the window before narrowing.
+     **This same latent bug is still in `src/gui_xlib.c:151-157`** — see the follow-up below.
+  3. `font_open` logged the *requested* font name after falling back, which makes a layout
+     rendering at the wrong size look inexplicable. Now logs what actually loaded. (Log text
+     only — the daemon's behaviour is unchanged.)
+- **Traps handled up front, per the plan**: every row is wrapped in `mu_push_id` (several buttons
+  labelled "Get" in one container would otherwise collide and route clicks to the wrong row); the
+  `(*)`/`( )` marker is its **own column**, not part of the button label, because `mu_button`
+  hashes the label and a label flipping `( )`→`(*)` would change the control's id between frames;
+  the log pane auto-scrolls by overshooting `scroll.y` and letting microui clamp;
+  `MU_COMMAND_ICON` stays a no-op and the layout deliberately uses no widget that emits one.
+- **Log ring is 64 KB stored but only the last ~8 KB rendered**, aligned to a line boundary.
+  `mu_text` emits one text command per wrapped line and `mu_push_command` *aborts the process* if
+  the 256 KB command list overflows, so rendering a full 64 KB of curl meter output is not safe.
+- **Start is gated** on `sel_whisper >= 0 && present`, with the reason on screen ("select a
+  whisper model and Get it first"). It is rendered but not yet wired: pressing it prints the
+  literal `scripts/waybar-dictation.sh start` command it will run in **D4**.
+- **Selection is pre-loaded from the config**, not defaulted to the first row, so the window opens
+  on what the daemon would actually read. When a configured path isn't a catalog entry, the pane
+  says so explicitly for *both* model kinds — otherwise the list would show "(*) none (raw
+  whisper)" while the config names a cleanup model, i.e. the display would be lying.
+- **The D2 post-reap drain is carried into the GUI loop**, for the same reason: on a fast failure
+  the text still buffered in the pipe when `waitpid` succeeds *is* the error message.
+  `download_cancel` runs from `setup_gui_destroy`, so Esc, the WM close button and SIGINT all
+  converge on one place that guarantees no orphan curl.
+- **Verified live** (X11 via XWayland under Hyprland; clicks delivered with `XSendEvent`, which
+  targets the window directly and so neither moves the user's pointer nor depends on where the
+  compositor placed the window; screenshots via `import`):
+  - **Regression check #1 from the plan: `pgrep -x dictation` prints nothing while the setup
+    window is open.** This is the collision that killed the `--setup` design; asserted directly,
+    twice.
+  - clicking a model name moves the marker and writes `configs/local.conf` (comments intact,
+    both keys correct); "none (raw whisper)" writes an empty `llama_model_path`.
+  - clicking **Get** on a missing model runs curl in-window: the command echoes as the first log
+    line, the meter renders as readable separate lines (CR translation working), the bar reaches
+    `100%  2 / 2 MB`, the row flips MISSING→ready, its Get button disappears, and — because no
+    whisper model had been chosen — it auto-selects and writes the config. Note this used a
+    **`file://` catalog, not a HuggingFace URL**: every model in the real catalog is already
+    present on this machine, so the real-network path has only ever been exercised headlessly
+    (D2's 148 MB `base.en` fetch). It is the same `downloader.c` either way.
+  - Esc and the WM close button both exit cleanly with no Xlib fatal error.
+  - closing **with a download in flight** cancels it: window exits, no orphan curl, no `.part`.
+  - `./dictation --gui` still brings up the override-redirect status panel unchanged.
+- **`9x15` is not installed on this machine**, so the window runs on `fixed` (13px). It is
+  readable but is the cramped case the plan chose 9x15 to avoid; on Arch the font comes from
+  `xorg-fonts-misc`. `--font XLFD` overrides it.
+- **Observed once, not reproduced**: during bring-up a single Get click produced hover but no
+  download. Four subsequent clean trials (three scripted, one instrumented showing
+  `MU_RES_SUBMIT`) all worked, and no mechanism was found. Recorded rather than dropped, in case
+  it recurs.
+- **Build**: `src/setup_gui.c` joins `SETUP_ONLY_SRCS` (so tests can link it) and `SETUP_SRCS`;
+  `SETUP_LDLIBS` becomes `-lX11`. `font_xlib.c`/`microui.c` are deliberately *not* in
+  `SETUP_ONLY_SRCS` — they are already in `SRCS`, and the same object twice on a link line is a
+  duplicate-symbol error. `dictation-setup` is **79 KB** and `ldd` shows only libX11 + libc:
+  still no whisper, llama or CUDA, and still no `deps-*` prerequisite.
+- **`tests/test_setup.c`** covers what needs no display: the ring's whole-line eviction (including
+  a single write larger than the ring, and a newline-free ring), the tail view's line alignment,
+  and the selection write including the empty-`llama_model_path` case. `make test` runs all ten
+  suites green.
+- **Follow-up worth doing, deliberately not done here**: `src/gui_xlib.c:151-157` has the same
+  `unsigned short` clip truncation. Two conditions currently keep it latent, and **both** matter:
+  the panel needs a *partially clipped* string to make `mu_draw_text` emit the sentinel at all
+  (in a 300x100 panel that means a transcript long enough to overflow its text area), **and**
+  `mu_text` is the last thing that panel draws, so the truncated clip dies with the frame. Adding
+  any widget after the transcript reintroduces the bug even if the text is usually short. The fix
+  is the same ten lines, but the daemon is in daily use on this branch and Phase D's contract is
+  that `gui_xlib.c` is not touched, so it should be a separate, deliberate commit.
+
 ### Phase D2 — downloader + headless `dictation-setup` (done)
 
 - **`src/downloader.{h,c}`**: `download_check_curl` / `download_start` / `download_read` /

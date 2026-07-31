@@ -8,8 +8,16 @@ int font_open(struct font_ctx *f, Display *dpy, const char *xlfd)
     f->dpy = dpy;
     f->fs = NULL;
 
-    if (xlfd && xlfd[0] != '\0')
+    /* Track what actually loaded, not what was asked for: reporting the
+     * requested name after a fallback makes a layout that renders at the
+     * wrong size look inexplicable. */
+    const char *loaded = "fixed";
+
+    if (xlfd && xlfd[0] != '\0') {
         f->fs = XLoadQueryFont(dpy, xlfd);
+        if (f->fs)
+            loaded = xlfd;
+    }
 
     if (!f->fs) {
         if (xlfd && xlfd[0] != '\0')
@@ -23,7 +31,7 @@ int font_open(struct font_ctx *f, Display *dpy, const char *xlfd)
     }
 
     log_info("font: loaded '%s' (ascent=%d descent=%d)",
-             (xlfd && xlfd[0]) ? xlfd : "fixed", f->fs->ascent, f->fs->descent);
+             loaded, f->fs->ascent, f->fs->descent);
     return 0;
 }
 
