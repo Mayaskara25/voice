@@ -2,6 +2,7 @@
 #define DICTATION_GUI_XLIB_H
 
 #include "font_xlib.h"
+#include "inject.h"
 #include "ipc_handoff.h"
 
 #include <X11/Xlib.h>
@@ -32,6 +33,7 @@ struct gui {
     struct font_ctx     font;
     mu_Context         *ctx;     /* heap-allocated (256KB command list) */
     struct ipc_handoff *ipc;
+    enum inject_backend inject_backend;
 
     /* tiny mu_Color -> X pixel cache (microui uses a small fixed palette) */
     unsigned int   color_key[GUI_MAX_COLORS];
@@ -42,7 +44,8 @@ struct gui {
 /* Creates the window, backbuffer, GC, font, and mu_Context. Returns 0 on
  * success, -1 on error (message logged). `font_xlfd` may be NULL/empty to use
  * the default. `dpy` and `ipc` are borrowed, not owned. */
-int  gui_init(struct gui *g, Display *dpy, struct ipc_handoff *ipc, const char *font_xlfd);
+int  gui_init(struct gui *g, Display *dpy, struct ipc_handoff *ipc, const char *font_xlfd,
+              enum inject_backend backend);
 
 /* Runs the poll() loop over {X connection fd, ipc self-pipe fd} until
  * gui_request_stop() is called. Performs pending text injection on this

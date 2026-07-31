@@ -7,8 +7,11 @@ dependency. The whole thing is a single C program linking directly against
 [whisper.cpp](https://github.com/ggml-org/whisper.cpp)'s C API — no Python, no subprocess
 orchestration, no HTTP service.
 
-Target platform: **Linux / X11** (developed on Ubuntu 24.04). See `PLAN.md` for the full
-design rationale and the reasoning behind every architecture decision.
+Target platform: **Linux** (tested on Ubuntu 24.04 / X11 and Arch / Hyprland). Keystroke injection has two
+backends (`inject_backend` in the config): `xtest` (default, X11 only) and `ydotool`
+(works under any Wayland compositor too, e.g. Hyprland — X11's XTest events never reach
+native Wayland clients). See `PLAN.md` for the full design rationale and the reasoning
+behind every architecture decision.
 
 ## Privacy
 
@@ -38,7 +41,82 @@ sudo usermod -aG input $USER                 # then LOG OUT AND BACK IN (newgrp 
 # download a whisper model (base.en = better accuracy, tiny.en = ~2x lower latency)
 ./whisper.cpp/models/download-ggml-model.sh base.en
 ln -sf ../whisper.cpp/models/ggml-base.en.bin models/ggml-base.en.bin
+
+# Note: example.conf uses a quantized large-v3-turbo model instead (better accuracy,
+# ~150MB faster startup, lower VRAM than base.en). Download it with:
+./whisper.cpp/models/download-ggml-model.sh large-v3-turbo
 ```
+
+### Optional: Wayland support (`inject_backend=ydotool`)
+
+XTest (the default injection backend) only reaches X11/XWayland-backed windows. Under a
+Wayland compositor (Hyprland, GNOME, KDE/Wayland, ...) native Wayland clients silently
+never receive the injected keystrokes at all — this isn't a bug to work around, it's
+Wayland's input-isolation security model. To inject there instead, use `ydotool`, which
+types via `/dev/uinput` at the kernel level and works under any compositor:
+
+```sh
+sudo pacman -S ydotool      # Arch (official 'extra' repo)
+sudo apt install ydotool    # Ubuntu -- verify it's packaged for your release
+```
+
+**Recommended: auto-start ydotoold via systemd user service** (starts automatically on login,
+no manual terminal needed):
+
+```sh
+systemctl --user enable --now ydotool.service
+systemctl --user status ydotool.service --no-pager  # verify it's running
+```
+
+Then set `inject_backend=ydotool` in your config. `./dictation` checks at startup that
+the `ydotool` binary and a running `ydotoold` are both reachable (via the same
+`YDOTOOL_SOCKET`/`$XDG_RUNTIME_DIR` resolution the CLI uses), and fails fast with a
+specific error if not, rather than silently doing nothing per keystroke.
+
+**(Legacy: manual invocation)** If your distro doesn't package the systemd service, run
+ydotoold manually in a separate terminal — the daemon socket must be pinned to match where
+the CLI/app expect it:
+```sh
+sudo ydotoold --socket-path="/run/user/$(id -u)/.ydotool_socket" \
+              --socket-own="$(id -u):$(id -g)" --socket-perm=0600 &
+```
+
+### Optional: on-demand start/stop via a Hyprland keybind + Waybar indicator
+
+Rather than leaving the daemon running (and its models resident on the GPU) for the
+whole session, `scripts/waybar-dictation.sh` starts/stops it on demand:
+
+```sh
+scripts/waybar-dictation.sh start    # launch headless, detached
+scripts/waybar-dictation.sh stop     # SIGINT -- same clean shutdown as Ctrl-C
+scripts/waybar-dictation.sh toggle   # start if not running, else stop
+scripts/waybar-dictation.sh status   # prints Waybar-compatible JSON: notactive/loading/active
+```
+
+`status` distinguishes "process running but models still loading" from "ready" by
+grepping the log for the `dictation: ready` line, so a UI indicator can show a
+loading state rather than jumping straight to "on". Process identity is tracked by
+name (`pgrep -x`/`pkill -INT -x dictation`), not a PID file — capturing `$!` across a
+`cd dir && nohup bin &` background job is unreliable (it can catch an intermediate
+shell PID instead of the exec'd binary's), which was confirmed the hard way during
+development.
+
+To wire this into Hyprland + Waybar (tested with an ml4w-dotfiles setup):
+- **Keybind**: bind a key to `scripts/waybar-dictation.sh toggle` (e.g. `SUPER + D`).
+- **Waybar module**: a `custom` module with `"return-type": "json"`, `"exec"` set to
+  `.../waybar-dictation.sh status`, `"on-click"` set to `.../waybar-dictation.sh toggle`,
+  plus a `"signal"` number so the toggle script can `pkill -RTMIN+N waybar` for an
+  instant refresh instead of waiting on a polling interval.
+- **If you're on ml4w-dotfiles**: don't edit its `default.lua` / `modules.json`
+  directly — ml4w's updater re-stages your whole profile from a fresh clone on
+  update, and only restores files it explicitly offers to keep. Put the keybind and
+  module definition in new files instead (e.g. `conf/keybindings/my.lua`,
+  `waybar/custom-dictation.json`) and just point the small stub
+  (`conf/keybinding.lua`) / theme `include` array at them. New files are never
+  touched by the update's restaging (it only overwrites paths that exist in the
+  fresh clone); only add the tiny stub/pointer files to
+  `~/.config/ml4w-dotfiles-installer/<profile-id>/blacklist` so ml4w's updater
+  leaves your one added line alone.
 
 ### Optional: LLM cleanup (Phase B, GPU)
 
@@ -58,6 +136,12 @@ llama.cpp + CUDA (`make` builds `deps-llama`), so the toolkit is required to bui
 run with cleanup off; a compile-time opt-out is possible future work. `n_gpu_layers=0` runs
 the model on CPU (much slower). The vendored `llama.cpp` is pinned so its bundled ggml (0.15.3)
 matches whisper's, letting both share one ggml backend.
+
+**Expected startup output on CUDA systems:** You'll see `load_tensors: offloaded 27/29 layers to GPU` and
+`load_tensors: CPU_Mapped model buffer size = 125 MiB`. The embedding table (`token_embd.weight`)
+stays in CPU memory by design — it's a lookup, not compute-intensive. This preserves ~125 MB of VRAM
+with negligible latency impact, while the actual 29 transformer layers (the computational bottleneck)
+remain fully GPU-accelerated. This is expected and optimal.
 
 ### Microphone gain / capture device (read this — it bit us)
 
@@ -87,7 +171,15 @@ make test       # unit tests: config parser, self-pipe handoff, whisper on jfk.w
 `make` targets: `all`, `app`, `deps-whisper`, `deps-llama`, `test`, `run`, `list-keys`,
 `clean`, `distclean` (also removes the slow-to-rebuild vendored `build/` dirs). The
 `deps-llama` sub-build compiles llama.cpp with `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75`
-(GTX 1650). LLM cleanup is optional at **runtime** (blank `llama_model_path`), but the build
+and `-DGGML_CUDA_FORCE_MMQ=ON`. The second flag is needed for Turing GPUs without tensor cores
+(e.g. GTX 1650) to force integer matmul kernels instead of a degraded tensor-core fallback path.
+
+**CUDA library paths:** The Makefile auto-derives `CUDA_HOME` from `nvcc`'s location. This works
+around a distro packaging difference: Ubuntu's `nvidia-cuda-toolkit` drops runtime libs
+(`libcudart`, `libcublas`) into default linker paths, while Arch's `cuda` package keeps them under
+`$CUDA_HOME/lib64`. The Makefile detects and adds the necessary `-L` flags automatically.
+
+LLM cleanup is optional at **runtime** (blank `llama_model_path`), but the build
 currently links llama.cpp + CUDA unconditionally.
 
 ## Run
@@ -129,11 +221,11 @@ Key = value, `#` starts a comment (see `configs/example.conf`):
 
 | Key | Meaning |
 |-----|---------|
-| `whisper_model_path` | path to the ggml whisper model (default `./models/ggml-base.en.bin`) |
+| `whisper_model_path` | path to the ggml whisper model (default in `example.conf`: `./models/ggml-large-v3-turbo-q5_0.bin`) |
 | `llama_model_path` | LLM cleanup model (GGUF); **blank = cleanup disabled** (raw whisper output) |
 | `cleanup_style` | `dictation` (default) / `code` / `commands`; only used when cleanup is on |
 | `n_gpu_layers` | LLM GPU offload: `99` = all layers on GPU, `0` = CPU-only |
-| `ptt_device` | evdev device (e.g. `/dev/input/event3`); blank = auto-detect |
+| `ptt_device` | evdev device (e.g. `/dev/input/event3`); blank = auto-detect. **Note:** with `inject_backend=ydotool`, auto-detect can pick up ydotoold's virtual uinput device instead of your physical keyboard — set this explicitly to avoid it. |
 | `ptt_keycode` | **evdev** key code (from `--list-keys`), *not* an X keysym; default 97 = RIGHTCTRL |
 | `audio_device` | ALSA capture device (e.g. `plughw:2,0`); blank = auto-detect |
 | `n_threads` | whisper CPU threads (also the LLM's CPU threads) |
@@ -142,6 +234,7 @@ Key = value, `#` starts a comment (see `configs/example.conf`):
 | `test_mode` | `true` = print instead of inject |
 | `gui_enabled` | `true` = show the status panel |
 | `gui_font` | X core font for the panel (XLFD/alias, e.g. `9x15`); blank = `fixed` |
+| `inject_backend` | `xtest` (default, X11 only) or `ydotool` (works on any Wayland compositor too) |
 
 > **evdev codes vs X keysyms are different numberspaces** — `ptt_keycode` is always the
 > evdev code reported by `--list-keys`, never an X keycode.
@@ -162,5 +255,6 @@ src/            application C sources (see PLAN.md "Module breakdown")
 configs/        example.conf
 models/         gitignored; downloaded whisper (and, later, llama) models
 tests/          assert-based unit tests (make test)
+scripts/        start/stop/status helper for Hyprland keybind + Waybar integration
 PLAN.md         the living design doc / source of truth across all phases
 ```

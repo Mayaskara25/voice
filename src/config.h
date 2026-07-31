@@ -20,6 +20,7 @@ struct app_config {
     char gui_font[CONFIG_PATH_MAX];          /* X core font (XLFD/alias) for the GUI; empty = "fixed" */
     char cleanup_style[32];                  /* LLM cleanup style: dictation|code|commands (Phase B) */
     int  n_gpu_layers;                       /* llama GPU offload: 0 = CPU, 99 = all layers (Phase B) */
+    char inject_backend[16];                 /* keystroke injection: "xtest" (default, X11) or "ydotool" (Wayland-compatible) */
 };
 
 /* Populates *cfg with defaults, then overrides from the key=value file at path.

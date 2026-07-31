@@ -30,6 +30,7 @@ void config_set_defaults(struct app_config *cfg)
     cfg->gui_font[0] = '\0';
     snprintf(cfg->cleanup_style, sizeof(cfg->cleanup_style), "dictation");
     cfg->n_gpu_layers = 99; /* offload all layers to GPU by default (Phase B) */
+    snprintf(cfg->inject_backend, sizeof(cfg->inject_backend), "xtest");
 }
 
 static char *trim(char *s)
@@ -83,6 +84,8 @@ static void apply_kv(struct app_config *cfg, const char *key, const char *value)
         snprintf(cfg->cleanup_style, sizeof(cfg->cleanup_style), "%s", value);
     } else if (strcmp(key, "n_gpu_layers") == 0) {
         cfg->n_gpu_layers = atoi(value);
+    } else if (strcmp(key, "inject_backend") == 0) {
+        snprintf(cfg->inject_backend, sizeof(cfg->inject_backend), "%s", value);
     } else {
         log_warn("config: unknown key '%s' ignored", key);
     }
@@ -161,6 +164,10 @@ int config_validate(const struct app_config *cfg)
     if (cfg->n_threads <= 0) {
         log_error("config: n_threads must be positive");
         return -1;
+    }
+
+    if (strcmp(cfg->inject_backend, "xtest") != 0 && strcmp(cfg->inject_backend, "ydotool") != 0) {
+        log_warn("config: unknown inject_backend '%s', falling back to 'xtest'", cfg->inject_backend);
     }
 
     return 0;

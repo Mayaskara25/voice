@@ -3,6 +3,7 @@
 #include "dictation_directives.h"
 #include "gui_xlib.h"
 #include "hotkey_evdev.h"
+#include "inject.h"
 #include "inject_xtest.h"
 #include "ipc_handoff.h"
 #include "llm_cleanup.h"
@@ -22,6 +23,7 @@ struct pipeline_ctx {
     Display                 *dpy;   /* headless direct-injection target; NULL in test-mode/GUI mode */
     const struct app_config *cfg;
     struct ipc_handoff      *ipc;   /* non-NULL in GUI mode: publish state + hand off injection */
+    enum inject_backend      inject_backend;
 };
 
 /* Publishes a pipeline state to the GUI (no-op in headless mode). */
@@ -107,7 +109,7 @@ static void on_ptt_up(void *user_data)
     } else {
         /* Headless mode: inject directly on this (worker) thread. */
         log_info("pipeline: injecting text");
-        inject_type_text(ctx->dpy, text);
+        inject_dispatch_type(ctx->inject_backend, ctx->dpy, text);
         free(text);
     }
 }
@@ -147,14 +149,19 @@ static void print_usage(const char *argv0)
  * Identical behavior to Phase A. Returns process exit code. */
 static int run_headless(struct stt_context *stt, struct llm_context *llm, struct app_config *cfg)
 {
+    enum inject_backend backend = inject_backend_parse(cfg->inject_backend);
+    if (inject_backend_check(backend) != 0)
+        return 1;
+
     Display *dpy = NULL;
-    if (!cfg->test_mode) {
+    if (!cfg->test_mode && inject_backend_needs_display(backend)) {
         dpy = inject_open_display();
         if (!dpy)
             return 1;
     }
 
-    struct pipeline_ctx pctx = { .stt = stt, .llm = llm, .dpy = dpy, .cfg = cfg, .ipc = NULL };
+    struct pipeline_ctx pctx = { .stt = stt, .llm = llm, .dpy = dpy, .cfg = cfg, .ipc = NULL,
+                                  .inject_backend = backend };
     struct hotkey_thread_args hargs = { .cfg = cfg, .user_data = &pctx };
 
     log_info("dictation: ready (test_mode=%s, gui=false) -- hold your PTT key to dictate",
@@ -177,7 +184,11 @@ static int run_headless(struct stt_context *stt, struct llm_context *llm, struct
  * publishes state and hands off injection via ipc_handoff. Returns exit code. */
 static int run_gui(struct stt_context *stt, struct llm_context *llm, struct app_config *cfg)
 {
-    Display *dpy = inject_open_display();
+    enum inject_backend backend = inject_backend_parse(cfg->inject_backend);
+    if (inject_backend_check(backend) != 0)
+        return 1;
+
+    Display *dpy = inject_open_display();   /* always needed for GUI rendering */
     if (!dpy)
         return 1;
 
@@ -188,13 +199,14 @@ static int run_gui(struct stt_context *stt, struct llm_context *llm, struct app_
     }
 
     struct gui gui;
-    if (gui_init(&gui, dpy, &ipc, cfg->gui_font) != 0) {
+    if (gui_init(&gui, dpy, &ipc, cfg->gui_font, backend) != 0) {
         ipc_free(&ipc);
         inject_close_display(dpy);
         return 1;
     }
 
-    struct pipeline_ctx pctx = { .stt = stt, .llm = llm, .dpy = NULL, .cfg = cfg, .ipc = &ipc };
+    struct pipeline_ctx pctx = { .stt = stt, .llm = llm, .dpy = NULL, .cfg = cfg, .ipc = &ipc,
+                                  .inject_backend = backend };
     struct hotkey_thread_args hargs = { .cfg = cfg, .user_data = &pctx };
 
     log_info("dictation: ready (test_mode=%s, gui=true) -- hold your PTT key to dictate",

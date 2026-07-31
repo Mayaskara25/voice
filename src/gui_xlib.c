@@ -1,6 +1,6 @@
 #include "gui_xlib.h"
 #include "app_state.h"
-#include "inject_xtest.h"
+#include "inject.h"
 #include "log.h"
 
 #include <errno.h>
@@ -54,11 +54,13 @@ static unsigned long alloc_pixel(struct gui *g, mu_Color c)
     return xc.pixel;
 }
 
-int gui_init(struct gui *g, Display *dpy, struct ipc_handoff *ipc, const char *font_xlfd)
+int gui_init(struct gui *g, Display *dpy, struct ipc_handoff *ipc, const char *font_xlfd,
+             enum inject_backend backend)
 {
     memset(g, 0, sizeof(*g));
     g->dpy    = dpy;
     g->ipc    = ipc;
+    g->inject_backend = backend;
     g->screen = DefaultScreen(dpy);
     g->width  = GUI_WIDTH;
     g->height = GUI_HEIGHT;
@@ -264,7 +266,7 @@ int gui_run(struct gui *g)
             if (text) {
                 /* Injection happens here, on the GUI thread that owns Display;
                  * it blocks, so the INJECTING label stays up for its duration. */
-                inject_type_text(g->dpy, text);
+                inject_dispatch_type(g->inject_backend, g->dpy, text);
                 free(text);
                 /* Return to IDLE only if the worker hasn't already begun a new
                  * utterance (re-pressed PTT) while we were typing. */
