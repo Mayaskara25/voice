@@ -115,7 +115,21 @@ $(SETUP_BIN): $(SETUP_OBJS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 # --- tests: small assert-based programs, no framework ---
-test: deps-whisper deps-llama $(TEST_BINS)
+# test_stt decodes 16-bit PCM, but the vendored whisper.cpp ships samples/jfk.mp3
+# (upstream dropped the .wav), so derive the wav from it. Generated, not
+# committed: gitignored, and `-` so a machine without ffmpeg just skips the test
+# rather than failing the build.
+SAMPLE_WAV := whisper.cpp/samples/jfk.wav
+
+$(SAMPLE_WAV): whisper.cpp/samples/jfk.mp3
+	-@if command -v ffmpeg >/dev/null 2>&1; then \
+		echo "ffmpeg -> $@"; \
+		ffmpeg -v error -y -i $< -ar 16000 -ac 1 -c:a pcm_s16le $@; \
+	else \
+		echo "note: ffmpeg not found -- test_stt will skip (no $@)"; \
+	fi
+
+test: deps-whisper deps-llama $(SAMPLE_WAV) $(TEST_BINS)
 	@rc=0; for t in $(TEST_BINS); do \
 		echo "=== $$t ==="; ./$$t || rc=1; \
 	done; exit $$rc

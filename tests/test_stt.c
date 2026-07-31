@@ -68,6 +68,17 @@ int main(void)
         return 0;
     }
 
+    /* The vendored whisper.cpp ships samples/jfk.mp3, not the .wav this loader
+     * wants, so the wav is generated from it by `make test` (see the Makefile's
+     * $(SAMPLE_WAV) rule). Skip rather than fail if it isn't there -- the same
+     * posture as the missing-model skip above. This was invisible until
+     * base.en was downloaded, because the model check returns first. */
+    if (stat(WAV_PATH, &st) != 0) {
+        printf("test_stt: SKIP (sample '%s' not present -- `make %s`, needs ffmpeg)\n",
+               WAV_PATH, WAV_PATH);
+        return 0;
+    }
+
     size_t n = 0;
     float *samples = load_wav(WAV_PATH, &n);
     if (!samples || n == 0) {

@@ -291,8 +291,25 @@ Each phase ends with an explicit end-to-end manual test (described per-phase abo
   - a 120 MB `file://` copy with a known catalog size → `progress: 0.0% → 100.0%`, exercising the
     `stat()`-based fraction D3's bar will draw.
   - SIGINT mid-fetch → "interrupted -- cancelling", no `.part`, no stray curl process.
-  Not verified: a *large* real model download end to end (`--fetch-model base.en`, 148 MB) — the
-  plumbing above covers every step of it, and this machine already has the models it uses.
+  - **the real thing**: `./dictation-setup --fetch-model base.en`, 141 MiB in 49 s at ~2.9 MB/s,
+    meter ticking the whole way, landing at `./models/ggml-base.en.bin` with no `.part`. The
+    catalog's advisory size turned out to be **12,746 bytes stale** (147,951,465 from the plan vs
+    the real 147,964,211), so the size-mismatch warning fired for real, on its first real
+    opportunity, and the file was kept — exactly the intended behaviour. `configs/models.conf` now
+    carries the verified size.
+- **The base.en fetch un-skipped `test_stt`, which then failed** — and the failure was a real,
+  pre-existing gap, not a regression: `WAV_PATH` is `whisper.cpp/samples/jfk.wav`, but the vendored
+  whisper.cpp ships only `samples/jfk.mp3` (upstream dropped the wav). The missing-model SKIP
+  returns first, so this had been invisible since Phase A — the "test_stt SKIPs" note in the D0/D1
+  logs was hiding two problems, not one. Fixed by deriving the wav from the tracked mp3 in a
+  `$(SAMPLE_WAV)` make rule (gitignored, `-`-prefixed so a machine without ffmpeg degrades to a
+  skip) plus a missing-sample SKIP branch in `test_stt.c` mirroring the model one. **`make test`
+  now runs all nine suites green with no skips at all**, and `test_stt: OK` is itself the proof
+  that the downloaded model is intact and usable — whisper loads it and returns the expected
+  transcript. Consequence worth knowing if a transcript mismatch is ever debugged here: the audio
+  is now mp3-derived, so it is not byte-identical to what Phase A transcribed. The assertion is a
+  substring check for "country" and was stable across repeated runs, so there is ample margin, but
+  it is not the same waveform.
 - **One cosmetic fix found by running it**: the periodic `progress:` line spliced itself into the
   middle of a half-written curl meter line. It is now gated on the downloader's `at_line_start`,
   so it only prints at a line boundary.
