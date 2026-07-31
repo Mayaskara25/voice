@@ -29,11 +29,11 @@ is_ready() {
 
 print_status() {
     if is_ready; then
-        echo '{"text":"","class":"active","tooltip":"Dictation: models loaded on GPU, ready\nSUPER+D or click to stop"}'
+        echo '{"text":"","class":"active","tooltip":"Dictation: models loaded on GPU, ready\nSUPER+D or click to stop"}'
     elif is_running; then
-        echo '{"text":"","class":"loading","tooltip":"Dictation: loading models onto GPU..."}'
+        echo '{"text":"","class":"loading","tooltip":"Dictation: loading models onto GPU..."}'
     else
-        echo '{"text":"","class":"notactive","tooltip":"Dictation: not loaded\nSUPER+D or click to start"}'
+        echo '{"text":"","class":"notactive","tooltip":"Dictation: not loaded\nSUPER+D or click to start"}'
     fi
 }
 
