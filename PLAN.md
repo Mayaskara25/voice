@@ -233,6 +233,82 @@ Each phase ends with an explicit end-to-end manual test (described per-phase abo
 
 ## Progress log
 
+### Phase D2 — downloader + headless `dictation-setup` (done)
+
+- **`src/downloader.{h,c}`**: `download_check_curl` / `download_start` / `download_read` /
+  `download_update_progress` / `download_reap` / `download_cancel`, plus a pure
+  `download_translate_cr()`. `pipe2(O_CLOEXEC)` + `fork` + `execvp("curl", …)` with the child's
+  stdout *and* stderr dup2'd onto the one pipe, parent's read end `O_NONBLOCK`. Command is
+  `curl -L --fail -o <dest>.part <url>`, kept in `d->cmdline` so the log pane's first line is a
+  copy-pasteable reproduction of the failure.
+- **`src/setup_main.c`**: `dictation-setup [--catalog PATH] [--models-dir DIR] [--list]
+  [--fetch-model ID]`. No GUI yet — D3 puts a window on exactly these calls. `--list` prints the
+  catalog with ready/MISSING status; `--fetch-model` runs the poll/read/tick/reap loop headless.
+- **The payoff of D0, measured**: `dictation-setup` is **40,912 bytes** against the daemon's
+  **73,334,824**, and `ldd` shows *only* libc — no X11, no CUDA, no llama/whisper/ggml symbols
+  (`nm -u | grep -ci 'cuda\|llama\|whisper\|ggml'` → 0). Its make target depends on neither
+  `deps-whisper` nor `deps-llama`, so a fresh clone can fetch models while the ~10-minute CUDA
+  build runs. Keep it that way.
+- **Read on any poll event, not just `POLLIN`.** When curl exits, `poll()` reports `POLLHUP` with
+  no `POLLIN`; a `POLLIN`-only loop spins at 100% CPU forever instead of seeing end-of-output.
+  Called out in both the CLI loop and the test's driver because D3's window inherits this loop.
+- **Reaping is not the end of reading** (found by review, and it is the failure this whole design
+  exists to prevent). Anything curl writes between the last `download_read` and its exit is still
+  buffered in the pipe when `waitpid` succeeds; a loop that stops on `download_reap` returning 1
+  silently drops it — and on a fast failure that dropped text *is* the entire error message. Both
+  the CLI loop and the test driver now drain to EOF after reaping. `tests/test_download.c` pins it
+  with a deterministic case (let curl exit, sleep, reap *first*, then drain, and assert `curl:`
+  survived); removing the post-reap drain makes that assertion fail, which was checked by
+  temporarily deleting it rather than assumed. Note the timing-dependent version of the same
+  assertion in the normal drive loop passes either way — it is not what guards this.
+- **`download_cancel` is bounded**: SIGTERM → `waitpid(WNOHANG)` poll for ~2 s → SIGKILL →
+  blocking wait. An unbounded cancel would hang the window's close path and any test that
+  exercises it. Verified by timing (< 3 s) and by asserting no zombie is left.
+- **`download_reap` is idempotent** (guards on `running`), so a second call can't waitpid a reaped
+  pid or rename twice. Exit 0 with no `.part` at all is treated as a *failure*, not a silent
+  success. A size mismatch against the catalog only warns — those sizes are advisory and go stale
+  when upstream re-uploads; curl considering the transfer complete is the real signal.
+- **`download_start` creates dest's parent directory.** A fresh clone has no `models/` at all
+  (git doesn't track empty directories), and curl would otherwise fail with a bare "Failed to open
+  the file".
+- **CR translation** lives in the downloader (`'\r'` → `'\n'`, runs collapsed) with the collapse
+  state carried in the struct across reads, so a run split over two `read()`s doesn't emit a blank
+  line. Unit-tested on synthetic meter fragments — no child process needed.
+- **`signal(SIGPIPE, SIG_IGN)` is in `main()`, not in the library.** A library function mutating
+  global signal disposition is the wrong shape; the parent never writes to the pipe anyway.
+- **`tests/test_download.c`** (added to `TEST_SRCS`) stays **offline**: transfers use `file://`
+  URLs, which curl supports natively. Covers the success path (`.part` promoted to dest, parent
+  dir created, `got_bytes` correct, pipe closed, reap idempotent), the failure path (nonzero exit,
+  no dest, `.part` removed), and cancellation (a FIFO nobody writes to parks curl in `open()`, so
+  the child is reliably alive with zero disk churn). SKIPs if curl is absent, after still checking
+  CR translation.
+- **`--fail` is HTTP-only, so `file://` cannot exercise it.** Verified by hand against the real
+  network instead, and recorded here rather than added to `make test`:
+  - bad HuggingFace URL → `curl: (22) The requested URL returned error: 404`, exit 22, **no stub
+    file** in the models dir, full curl text on screen and the command echoed for re-running.
+  - real HTTPS fetch (a small file from the same repo) → the `-L` redirect and then the file, meter
+    readable across lines (CR translation working), landed at dest with no `.part`.
+  - a 120 MB `file://` copy with a known catalog size → `progress: 0.0% → 100.0%`, exercising the
+    `stat()`-based fraction D3's bar will draw.
+  - SIGINT mid-fetch → "interrupted -- cancelling", no `.part`, no stray curl process.
+  Not verified: a *large* real model download end to end (`--fetch-model base.en`, 148 MB) — the
+  plumbing above covers every step of it, and this machine already has the models it uses.
+- **One cosmetic fix found by running it**: the periodic `progress:` line spliced itself into the
+  middle of a half-written curl meter line. It is now gated on the downloader's `at_line_start`,
+  so it only prints at a line boundary.
+- **Build wiring, deliberately minimal** (the daemon is in daily use on this branch, so its link
+  line is unchanged this commit): new `SETUP_ONLY_SRCS := src/downloader.c` and
+  `OBJS_TEST := $(OBJS_NOMAIN) $(SETUP_ONLY_OBJS)`; the test rule now links `OBJS_TEST`. `SRCS` was
+  **not** touched — D1's note about `model_catalog.o` being dead weight in the daemon still stands,
+  and that cleanup belongs in D3 when `SETUP_SRCS` grows the GUI files. `all` now builds `setup`
+  too, and `clean` removes both binaries.
+- **Regression**: `make test` exits 0 with `test_download` added (`test_stt` still SKIPs for the
+  pre-existing D0 reason). `make app` reports nothing to do, and `./dictation --help` /
+  `./dictation-setup --list` both behave — the running daemon is untouched.
+- **Still open for D3/D4**: nothing writes `configs/local.conf` yet, so
+  `scripts/waybar-dictation.sh`'s hardcoded `configs/example.conf` (D1's noted follow-up) remains
+  latent and remains D4's.
+
 ### Phase D1 — model catalog + config writer (done)
 
 - **`configs/models.conf`** created with the three seed rows (large-v3-turbo-q5_0, base.en,

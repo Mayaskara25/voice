@@ -4,6 +4,7 @@ models/*.bin
 models/*.gguf
 *.o
 /dictation
+/dictation-setup
 
 # written by dictation-setup (Phase D), seeded from configs/example.conf
 configs/local.conf

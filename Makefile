@@ -29,7 +29,29 @@ OBJS := $(SRCS:.c=.o)
 # Everything except the app entry point, for linking test binaries.
 OBJS_NOMAIN := $(filter-out src/main.o,$(OBJS))
 
+# Compiled into dictation-setup (and its tests) but never into the daemon.
+SETUP_ONLY_SRCS := src/downloader.c
+SETUP_ONLY_OBJS := $(SETUP_ONLY_SRCS:.c=.o)
+
+# Test binaries link the daemon's objects plus the setup-only ones, so a test
+# can exercise either side without the daemon growing code it never calls.
+OBJS_TEST := $(OBJS_NOMAIN) $(SETUP_ONLY_OBJS)
+
+# Phase D: the model picker/downloader, a separate executable because
+# scripts/waybar-dictation.sh identifies the daemon by name (pgrep -x dictation).
+# Deliberately depends on NEITHER deps-whisper NOR deps-llama -- that is the
+# payoff of the D0 llm_styles split, and is what lets a fresh clone fetch models
+# before sitting through the ~10-minute CUDA dependency build. Keep it that way:
+# nothing here may pull in whisper.cpp, llama.cpp or CUDA.
+SETUP_BIN  := dictation-setup
+SETUP_SRCS := src/setup_main.c src/downloader.c src/model_catalog.c src/config_write.c \
+              src/config.c src/llm_styles.c src/log.c
+SETUP_OBJS := $(SETUP_SRCS:.c=.o)
+# D3 adds -lX11 here along with the window; nothing needs a library yet.
+SETUP_LDLIBS :=
+
 TEST_SRCS := tests/test_config.c tests/test_config_write.c tests/test_catalog.c \
+             tests/test_download.c \
              tests/test_directives.c tests/test_ipc.c tests/test_stt.c tests/test_llm.c tests/test_inject.c
 TEST_BINS := $(TEST_SRCS:.c=)
 
@@ -47,9 +69,9 @@ LDLIBS := -L$(WHISPER_BUILD)/src -lwhisper \
 
 BIN := dictation
 
-.PHONY: all deps-whisper deps-llama app test clean distclean run list-keys
+.PHONY: all deps-whisper deps-llama app setup test clean distclean run list-keys
 
-all: deps-whisper deps-llama app
+all: deps-whisper deps-llama app setup
 
 deps-whisper: $(WHISPER_LIB)
 
@@ -84,6 +106,11 @@ app: $(BIN)
 $(BIN): $(OBJS)
 	$(CC) $(OBJS) -o $@ $(LDLIBS)
 
+setup: $(SETUP_BIN)
+
+$(SETUP_BIN): $(SETUP_OBJS)
+	$(CC) $(SETUP_OBJS) -o $@ $(SETUP_LDLIBS)
+
 %.o: %.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -93,11 +120,11 @@ test: deps-whisper deps-llama $(TEST_BINS)
 		echo "=== $$t ==="; ./$$t || rc=1; \
 	done; exit $$rc
 
-$(TEST_BINS): tests/%: tests/%.c $(OBJS_NOMAIN)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(OBJS_NOMAIN) -o $@ $(LDLIBS)
+$(TEST_BINS): tests/%: tests/%.c $(OBJS_TEST)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(OBJS_TEST) -o $@ $(LDLIBS)
 
 clean:
-	rm -f $(OBJS) $(BIN) $(TEST_BINS)
+	rm -f $(OBJS) $(SETUP_OBJS) $(SETUP_ONLY_OBJS) $(BIN) $(SETUP_BIN) $(TEST_BINS)
 
 distclean: clean
 	rm -rf $(WHISPER_BUILD) $(LLAMA_BUILD)
