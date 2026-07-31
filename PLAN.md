@@ -233,6 +233,80 @@ Each phase ends with an explicit end-to-end manual test (described per-phase abo
 
 ## Progress log
 
+### Phase D1 — model catalog + config writer (done)
+
+- **`configs/models.conf`** created with the three seed rows (large-v3-turbo-q5_0, base.en,
+  Qwen2.5-1.5B-Instruct Q4_K_M) in the planned `kind|id|display|filename|url|size_bytes` format.
+  Sizes: the two locally present files were `stat`ed for real values — large-v3-turbo-q5_0 is
+  `574041195` (matches the plan) and the Qwen GGUF is `1117320736` (the plan's `…064` was wrong,
+  corrected here). base.en's `147951465` is upstream-sourced and *not* verified locally; the file
+  isn't downloaded on this machine. Sizes are advisory anyway (progress bar only).
+- **`src/model_catalog.{h,c}`**: `catalog_load` / `catalog_refresh_presence` / `catalog_find` /
+  `catalog_free` over a `realloc`-grown `struct model_entry[]`, exactly as specified.
+  - **Deliberate divergence from `config.c`: no inline-`#`-comment stripping.** `config.c:122`
+    truncates a value at the first `#`; doing that here would silently corrupt any URL with a
+    fragment or query, so only a whole-line `#` (after leading whitespace) is a comment. Called
+    out in a code comment, since the divergence otherwise reads as an oversight, and covered by a
+    test using `…/t.bin?a=1#f`.
+  - **Over-long fields are rejected, not truncated.** A `snprintf`-truncated URL is a 404 in D2
+    that looks like upstream moved the file; `copy_field()` warns and skips the row instead. Same
+    posture for an unknown `kind`. A bad `size_bytes` is the one soft failure — it degrades to `0`
+    (unknown) rather than dropping an otherwise usable model.
+  - `getline` instead of `config.c`'s fixed `char[1024]`: a record is a URL plus a display name,
+    and a silently split line would parse as two malformed ones.
+  - `catalog_refresh_presence` checks `snprintf`'s return and treats an overlong
+    `<models_dir>/<filename>` as missing, so `-Wformat-truncation` has nothing to complain about.
+- **`trim()` duplicated, not exported.** `config.c`'s is file-static; the point of this phase is
+  that `model_catalog.o` doesn't have to link `config.o`, so a byte-identical six-line static copy
+  lives in `model_catalog.c` with a comment naming its origin. `config_write.c` needs no trim at
+  all — it does anchored `[ \t]` scanning instead.
+- **`src/config_write.{h,c}`**: `config_write_keys()` (line-preserving rewriter), plus
+  `config_bootstrap_local()` and `config_default_path()`.
+  - The anchor is `^[ \t]*<key>[ \t]*=` and nothing else, so `example.conf`'s prose comments that
+    *mention* `whisper_model_path`, and any `#whisper_model_path=…` line, survive untouched.
+  - **Every** matching occurrence is rewritten, not just the first: `config_load` is last-wins, so
+    leaving a later duplicate would silently override the value just written.
+  - Unhandled keys are appended under `# --- written by dictation-setup ---`, emitted only when
+    there is something to append, and a file not ending in `\n` gets a separator first. The result
+    is idempotent: a second call finds the appended line and rewrites it in place — asserted
+    (exactly one header, one key) rather than assumed.
+  - `.tmp` + `rename()`, with `fclose`'s return checked before the rename (buffered write errors
+    such as `ENOSPC` surface at flush time — an unchecked one turns "atomic write" into
+    "atomically installed a truncated config") and the `.tmp` unlinked on every failure path.
+  - `config_bootstrap_local` creates with `O_WRONLY|O_CREAT|O_EXCL` rather than stat-then-copy, so
+    seeding can never clobber a config the user edited, even against a concurrent setup process.
+    Returns 1=created / 0=already existed / -1=error.
+- **`config_default_path()` lives in `config_write.c`, not static in `main.c`**, because D2's
+  `setup_main.c` needs the same preference and this makes it testable. `main.c:236` now calls it,
+  and the `--help` text was updated to match — a `--help` that still claimed
+  `configs/example.conf` would be a lie.
+- **Build wiring**: `src/config_write.c` and `src/model_catalog.c` were added to `SRCS`, which is
+  the cheapest way to satisfy the existing `tests/%: tests/%.c $(OBJS_NOMAIN)` rule. The daemon
+  therefore links `model_catalog.o` without ever calling it (~2 KB of an already-73 MB binary);
+  `config_write.o` is genuinely used via `config_default_path()`. The alternative — a separate
+  object list just for the two new tests — buys nothing until `dictation-setup` needs its own
+  `SETUP_SRCS` in D2/D3, and can be revisited then.
+- **Tests**: `tests/test_catalog.c` and `tests/test_config_write.c` added to `TEST_SRCS`. Beyond
+  the planned cases they assert that the *shipped* `configs/models.conf` parses (nothing else
+  validates those seed rows; note the cwd dependency — `make test` runs from the repo root), that
+  a commented-out assignment is not rewritten, that an empty `llama_model_path=` round-trips
+  through `config_load` to a cleanup-disabled config (D3's "none (raw whisper)" option), and that
+  bootstrapping twice preserves a hand edit.
+- **Verification**: `make test` exits 0 — `test_config`, `test_config_write`, `test_catalog`,
+  `test_directives`, `test_ipc`, `test_llm`, `test_inject` pass; `test_stt` still SKIPs for the
+  pre-existing reason recorded under D0. `make app` and both new test binaries compile
+  warning-clean (checked with the test binaries deleted first, so the compile actually ran), and
+  `nm -u` on both new objects shows only libc plus `log_msg` — they stay linkable into a
+  CUDA-free `dictation-setup`. Confirmed by hand that a `configs/local.conf` naming a bogus model
+  makes a bare `./dictation` fail on *that* path, i.e. the new default is really in effect.
+- **`.gitignore`**: `configs/local.conf` plus `configs/*.tmp` (the rewriter's scratch file, in case
+  a crash ever leaves one behind).
+- **Known follow-up for D4, deliberately not fixed here**: `scripts/waybar-dictation.sh:14` still
+  passes `configs/example.conf` explicitly, so a script-started daemon and a bare `./dictation`
+  can now read *different* files. It is latent — nothing writes `local.conf` until D3 — and that
+  script is D4's scope, but it must be done in the same commit that makes the GUI write
+  `local.conf`.
+
 ### Phase D0 — llm_styles split (done)
 
 - **`src/llm_styles.{h,c}`** created: the `struct cleanup_style` definition, the three-row

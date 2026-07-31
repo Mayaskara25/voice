@@ -17,7 +17,8 @@ LLAMA_LIB   := $(LLAMA_BUILD)/src/libllama.a
 CUDA_HOME  := $(shell dirname $$(dirname $$(command -v nvcc 2>/dev/null)) 2>/dev/null)
 CUDA_LIBDIR := $(if $(CUDA_HOME),-L$(CUDA_HOME)/lib64 -L$(CUDA_HOME)/lib)
 
-SRCS := src/main.c src/config.c src/log.c src/hotkey_evdev.c src/audio_alsa.c \
+SRCS := src/main.c src/config.c src/config_write.c src/model_catalog.c \
+        src/log.c src/hotkey_evdev.c src/audio_alsa.c \
         src/stt_whisper.c src/inject_xtest.c src/inject_ydotool.c src/inject.c \
         src/llm_cleanup.c src/llm_styles.c \
         src/dictation_directives.c \
@@ -28,7 +29,8 @@ OBJS := $(SRCS:.c=.o)
 # Everything except the app entry point, for linking test binaries.
 OBJS_NOMAIN := $(filter-out src/main.o,$(OBJS))
 
-TEST_SRCS := tests/test_config.c tests/test_directives.c tests/test_ipc.c tests/test_stt.c tests/test_llm.c tests/test_inject.c
+TEST_SRCS := tests/test_config.c tests/test_config_write.c tests/test_catalog.c \
+             tests/test_directives.c tests/test_ipc.c tests/test_stt.c tests/test_llm.c tests/test_inject.c
 TEST_BINS := $(TEST_SRCS:.c=)
 
 # One shared ggml: llama's CUDA-enabled 0.15.3 serves BOTH whisper (CPU backend,

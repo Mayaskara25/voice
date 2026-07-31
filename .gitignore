@@ -5,6 +5,10 @@ models/*.gguf
 *.o
 /dictation
 
+# written by dictation-setup (Phase D), seeded from configs/example.conf
+configs/local.conf
+configs/*.tmp
+
 # compiled test binaries (sources kept)
 tests/test_*
 !tests/test_*.c

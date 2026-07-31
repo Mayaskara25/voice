@@ -1,5 +1,6 @@
 #include "audio_alsa.h"
 #include "config.h"
+#include "config_write.h"
 #include "dictation_directives.h"
 #include "gui_xlib.h"
 #include "hotkey_evdev.h"
@@ -138,7 +139,8 @@ static void print_usage(const char *argv0)
 {
     fprintf(stderr,
         "usage: %s [--config PATH] [--test-mode] [--gui] [--list-keys] [-h|--help]\n"
-        "  --config PATH   config file (default: configs/example.conf)\n"
+        "  --config PATH   config file (default: configs/local.conf if present,\n"
+        "                  else configs/example.conf)\n"
         "  --test-mode     print transcripts to stdout instead of injecting\n"
         "  --gui           show the microui/Xlib status panel (overrides config)\n"
         "  --list-keys     print (device, evdev code, name) for keypresses, then exit\n",
@@ -233,7 +235,10 @@ static int run_gui(struct stt_context *stt, struct llm_context *llm, struct app_
 
 int main(int argc, char **argv)
 {
-    const char *config_path = "configs/example.conf";
+    /* Prefer the setup GUI's configs/local.conf when it exists (Phase D), so a
+     * bare ./dictation doesn't silently read a different file than the one the
+     * setup window just wrote. */
+    const char *config_path = config_default_path();
     bool force_test_mode = false;
     bool force_gui = false;
     bool list_keys = false;
