@@ -22,15 +22,11 @@ struct llm_context {
  * the GPU (99 = all); 0 = CPU-only. Returns 0 on success, -1 on error. */
 int   llm_init(struct llm_context *llm, const char *model_path, int n_threads, int n_gpu_layers);
 
-/* Cleans `raw` using the named style's system prompt (see llm_cleanup.c). Each
- * call is stateless (KV cache cleared first). Returns a newly malloc'd,
- * NUL-terminated string (caller frees), or NULL on any error/empty output. */
+/* Cleans `raw` using the named style's system prompt (styles live in
+ * llm_styles.c). Each call is stateless (KV cache cleared first). Returns a
+ * newly malloc'd, NUL-terminated string (caller frees), or NULL on any
+ * error/empty output. Unknown style names fall back to "dictation". */
 char *llm_clean(struct llm_context *llm, const char *raw, const char *style_name);
-
-/* Returns 1 if `name` is a known cleanup style, else 0. (Unknown styles still
- * work at runtime -- llm_clean falls back to "dictation" -- this just lets the
- * config layer warn.) Safe to call without llm_init. */
-int   llm_style_is_known(const char *name);
 
 void  llm_free(struct llm_context *llm);
 

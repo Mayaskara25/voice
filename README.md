@@ -29,6 +29,7 @@ experimentation.
 | **A** | capture → whisper → inject (headless) | ✅ done |
 | **C** | microui/Xlib status GUI (focus-preserving) | ✅ done |
 | **B** | optional GPU LLM cleanup via llama.cpp | ✅ done |
+| **D** | setup GUI (model picker + downloader) & `.desktop` entry | 🚧 planned |
 
 ## One-time setup
 

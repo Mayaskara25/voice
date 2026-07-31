@@ -20,7 +20,7 @@ Design principle driving several decisions below: the tool is **focus-preserving
 8. **Two-thread model**: one thread owns the X11 `Display` connection (XTest injection +, if `--gui`, the microui event loop and rendering); a worker thread owns evdev listening, ALSA capture, whisper/llama inference. Handoff via a mutex+condvar-guarded struct; because the GUI thread blocks in `XNextEvent`/`select()`, the worker must also signal via a **self-pipe** (or `eventfd`) included in the GUI thread's `poll()` set — a plain shared flag will not wake it. `mu_Context` is touched exclusively by the GUI thread (microui is not thread-safe).
 9. **Config**: hand-parsed `key=value` INI-style file, no JSON/TOML library.
 10. **Build**: top-level `Makefile` drives whisper.cpp's (and later llama.cpp's) own CMake as sub-builds, plus `gcc` for the project's own sources and `microui/src/microui.c`.
-11. **Single binary.** CLI/headless is the default mode; `--gui` is a runtime flag on the same process — no IPC between separate GUI/CLI binaries.
+11. **Single binary.** CLI/headless is the default mode; `--gui` is a runtime flag on the same process — no IPC between separate GUI/CLI binaries. *(Amended in Phase D: the setup GUI ships as a separate `dictation-setup` executable, because `pgrep -x dictation` process identity cannot distinguish a `--setup` window from a running daemon. The no-IPC rationale still holds — the setup window talks to the daemon only via `scripts/waybar-dictation.sh`. See Phase D.)*
 12. **Models**: whisper `tiny.en`/`base.en` (via whisper.cpp's own `models/download-ggml-model.sh`); llama.cpp Phase B uses a small quantized instruct GGUF (e.g. Qwen2.5-1.5B-Instruct or Llama-3.2-1B-Instruct, Q4_K_M).
 
 **This file is the single living source of truth across all phases** — phase "done" checklists, verification notes, and any deviations discovered during implementation get appended to this same document in place. No separate `PHASE_A.md`/`PHASE_B.md` files, to avoid drifting/inconsistent assumptions across phases.
@@ -124,6 +124,103 @@ Done when: cleanup is a working, toggleable stage; both toggle states verified; 
 
 Done when: both modes work from the same binary via one runtime flag; focus-preservation check passes; code review confirms `mu_Context` is touched only from the GUI thread.
 
+### Phase D — Setup GUI, model downloader, desktop integration
+
+**Motivation.** Going from `git clone` to a working daemon is currently a manual, README-driven
+process: download a whisper model via `download-ggml-model.sh`, `wget` a GGUF cleanup model, then
+hand-edit `configs/example.conf` to point `whisper_model_path`/`llama_model_path` at what landed.
+Every step is a place to get a path wrong, and `config_validate()` turns a wrong path into a fatal
+startup error with no guidance. Phase D replaces that with a small microui/Xlib **setup window**:
+pick a whisper model and a cleanup model from a list, download whatever is missing (live progress
+bar + the raw `curl` output visible in-window), press **Start**. Plus an XDG `.desktop` entry so
+the tool appears in the desktop app search menu like any other installed application.
+
+**The Super+D keybind is unchanged.** It calls `scripts/waybar-dictation.sh toggle` directly and
+never opens the GUI; the setup window and the keybind are independent front-ends onto the same
+script.
+
+**Deviation from decision #11 (recorded deliberately).** Phase D ships a **second binary**,
+`dictation-setup`, rather than a `--setup` flag on `dictation`. The flag approach was chosen first
+and is broken: the launcher script's whole process-identity contract is `pgrep -x dictation` /
+`pkill -INT -x dictation`, which matches the *executable basename* and ignores arguments. A window
+running as `dictation --setup` is therefore indistinguishable from a running daemon — `is_running()`
+returns true the moment the window opens, so `[Start]` silently no-ops forever, and `[Stop]` (or
+Super+D while the window is open) would kill the setup window instead of the daemon. A distinct
+process name removes this by construction with no script changes. Note that #11's stated rationale
+("no IPC between separate GUI/CLI binaries") does not apply here: the setup window performs no IPC
+with the daemon, it invokes the same launcher script Waybar does.
+
+**Enabling refactor (D0).** `config.c` includes `llm_cleanup.h` for a single call to
+`llm_style_is_known()`, which drags `llm_cleanup.o` → `libllama.a` → `libggml*.a` → CUDA — the
+reason every `tests/` binary is 73 MB. `nm -u src/config.o` confirms that symbol is the *only*
+non-libc, non-`log_msg` undefined reference, so moving the `{name, system_prompt}` style table into
+a new dependency-free `src/llm_styles.c` (~15 lines) severs the edge. `dictation-setup` then links
+only `-lX11` and builds **without whisper, llama, or CUDA present at all** — so on a fresh clone the
+setup GUI can be built in seconds and used to download models *before* the ~10-minute dependency
+build.
+
+**Locked-in Phase D decisions:**
+
+- **Downloads shell out to `curl`, not libcurl.** `fork`/`execvp("curl", …)` with stdout+stderr
+  merged onto one pipe, streamed line-by-line into a scrollable log pane in the window. Chosen so
+  failures show the *actual* command output rather than a paraphrase — a vague "download failed" is
+  useless for diagnosing what upstream changed. The exact command is echoed as the pane's first line
+  so it can be pasted into a terminal to reproduce. This also keeps `LDLIBS` free of `-lcurl`,
+  preserving the "no network code in the binary" property stated at the top of this document.
+- **`--fail` is mandatory** on the curl invocation. Without it an HTTP 404 writes the error page
+  into the output file, leaving a ~500-byte "model" that then fails incomprehensibly deep inside
+  whisper.cpp. Download to `<dest>.part` and `rename()` only on exit 0, so a partial or failed
+  fetch never occupies the final filename.
+- **No threads.** The download is a child process; its pipe fd joins `ConnectionNumber(dpy)` in the
+  existing `poll()` skeleton. The only change from the status panel's loop is that the infinite
+  timeout becomes ~250 ms while a download or daemon-status poll is live, since the progress bar is
+  computed by re-`stat()`ing the `.part` file and must tick even when curl emits nothing.
+- **Model catalog lives in `configs/models.conf`**, not a hardcoded C table — pipe-separated
+  `kind|id|display|filename|url|size_bytes` records. When HuggingFace moves a file, that is a
+  one-line data edit rather than a recompile. Sizes are advisory (progress bar only); a stale size
+  makes the bar slightly wrong but never breaks a download.
+- **Config is written to a new gitignored `configs/local.conf`**, seeded by copying
+  `example.conf` (so it inherits the ~55 lines of comments and every other tuned setting). The
+  writer is **line-preserving** — the parser in `config.c` discards comments, so a naive
+  read-modify-write would destroy the documentation. Write to `.tmp` + `rename()`.
+  `waybar-dictation.sh` and `main.c`'s default `config_path` both prefer `local.conf` when present.
+- **Start/stop shells out to `scripts/waybar-dictation.sh`**, never reimplemented in C. That script
+  already handles the mandatory `cd "$DICT_DIR"` (relative model paths), the nohup detach, the log
+  file, and the Waybar signal; a second launcher could disagree with it about process identity.
+- **Start is gated** on the selected whisper model actually being present. `local.conf` is seeded
+  from `example.conf`, which names models that don't exist on a fresh clone — an ungated Start would
+  hand the user the exact `config_validate` fatal this phase exists to eliminate, just behind a
+  button. A cleanup model stays optional (blank `llama_model_path` disables cleanup at runtime) and
+  must not gate Start.
+- **No editable text fields in the window.** Deliberate scope limit: it avoids `XLookupString` +
+  `mu_input_text` + `mu_textbox` plumbing entirely (the status panel has no keyboard path at all
+  today) and is what keeps the window genuinely minimal. Everything is list selection and buttons.
+
+**Inverted from the Phase C panel** (each of these is load-bearing for the panel and wrong here):
+`override_redirect` stays **False** so the window is WM-managed and focusable; `WM_DELETE_WINDOW`
+must be handled or clicking the WM close button drops the X connection and Xlib aborts the process;
+`KeyPressMask` is added (Esc-to-close only); `XSetClassHint` `res_class` must equal the
+`.desktop` file's `StartupWMClass` or the window won't associate with its launcher icon; font
+defaults to `9x15` rather than `fixed` (13px is cramped for a widget-dense form). `gui_xlib.c` is
+**not modified** — `setup_gui.c` reuses its rasterizer, color cache, backbuffer blit and poll
+skeleton by copy, so the focus-preserving panel cannot regress.
+
+Sub-phases, each independently verifiable: **D0** llm_styles split → **D1** catalog + config writer
+(+ `tests/test_catalog.c`, `tests/test_config_write.c`) → **D2** downloader, exercised first via a
+headless `--fetch-model <id>` flag so the fork/exec/pipe/CR-translation work is de-risked before any
+GUI exists (same discipline as validating `stt_whisper.c` standalone in Phase A) → **D3** the window
+→ **D4** daemon start/stop wiring → **D5** `.desktop` + `make install-desktop`.
+
+**Deferred to future work:** pinning HuggingFace URLs to a commit revision instead of `main`,
+querying the HF JSON API for filenames rather than hardcoding them, and SHA256 verification of
+downloads. The catalog-as-data decision above is the cheap mitigation that covers most URL rot;
+these three are the fuller fix if breakage actually becomes routine.
+
+Done when: `dictation-setup` builds without the CUDA/llama chain; a fresh clone can select and
+download both models and start the daemon entirely from the window; `pgrep -x dictation` prints
+nothing while the setup window is open; Super+D and `./dictation --gui` both behave exactly as
+before.
+
 ## Correctness-critical details (call out explicitly in code/comments where relevant)
 - evdev `value==2` (auto-repeat) must never restart capture — only edges (`1`/`0`) matter.
 - evdev keycodes and X keysyms/keycodes are different numberspaces — never conflate them in code, comments, or config docs.
@@ -135,6 +232,29 @@ Done when: both modes work from the same binary via one runtime flag; focus-pres
 Each phase ends with an explicit end-to-end manual test (described per-phase above) run by the user: hold the configured PTT key while focused on a real text editor, speak, release, and confirm the correct text is typed into that editor (or printed, in test-mode) without the editor ever losing focus. Phase A/B use headless mode; Phase C additionally confirms the status GUI never steals focus. Latency and any environment-specific findings (ALSA format choice, keyboard device ambiguity resolution, model latency numbers) get recorded directly in this file as they're discovered.
 
 ## Progress log
+
+### Phase D0 — llm_styles split (done)
+
+- **`src/llm_styles.{h,c}`** created: the `struct cleanup_style` definition, the three-row
+  `STYLES[]` table, `llm_style_find()` (was the file-static `find_style()`), and
+  `llm_style_is_known()` moved verbatim out of `llm_cleanup.c`. Prompts unchanged.
+- **Callers repointed**: `llm_cleanup.c` includes `llm_styles.h` and calls `llm_style_find()`;
+  `config.c:2` swapped `llm_cleanup.h` → `llm_styles.h`; `llm_style_is_known`'s declaration moved
+  out of `llm_cleanup.h`. `src/llm_styles.c` added to `SRCS`. No other call sites existed
+  (grep-confirmed: only `config.c:153` ever used it).
+- **Decoupling verified**: `nm -u src/llm_styles.o` reports exactly one undefined symbol,
+  `strcmp`. `config.o`'s undefined set is otherwise unchanged and now libc-only plus `log_msg`
+  and `llm_style_is_known`.
+- **Payoff measured, not assumed**: a probe calling `config_load()` links cleanly from just
+  `config.o + log.o + llm_styles.o` with **no `-lllama`, `-lwhisper`, `-lggml*`, `-lcudart`,
+  `-lX11` or `-lpthread`**, and parses `example.conf` correctly. **17,640 bytes** versus
+  **73,321,952** for `tests/test_config` — ~4,000x smaller. This is what lets `dictation-setup`
+  (D1-D5) build without the CUDA/llama toolchain present.
+- **No regression**: `make app` builds warning-clean apart from the pre-existing
+  `hotkey_evdev.c` `-Wformat-truncation`. `make test` exits 0 — `test_config`, `test_directives`,
+  `test_ipc`, `test_llm`, `test_inject` all pass; `test_stt` SKIPs because it hardcodes
+  `models/ggml-base.en.bin`, which is absent on this machine (only the large-v3-turbo variants
+  are downloaded). That skip predates this change and is unrelated to it.
 
 ### Enhancement — whisper on GPU (done)
 

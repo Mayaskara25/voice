@@ -19,7 +19,7 @@ CUDA_LIBDIR := $(if $(CUDA_HOME),-L$(CUDA_HOME)/lib64 -L$(CUDA_HOME)/lib)
 
 SRCS := src/main.c src/config.c src/log.c src/hotkey_evdev.c src/audio_alsa.c \
         src/stt_whisper.c src/inject_xtest.c src/inject_ydotool.c src/inject.c \
-        src/llm_cleanup.c \
+        src/llm_cleanup.c src/llm_styles.c \
         src/dictation_directives.c \
         src/ipc_handoff.c src/font_xlib.c src/gui_xlib.c \
         microui/src/microui.c
