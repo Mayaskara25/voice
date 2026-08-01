@@ -69,6 +69,11 @@ a symlink pointing outside has only its link removed, and the dialog says so and
 0 MB freed. Removing the model your config currently names is allowed, but it's called out
 in the dialog — Super+D would fail until you pick another or re-download it.
 
+Removing and re-downloading the same model repeatedly does **not** accumulate disk usage;
+each removal frees what the previous download took. Note that after the first
+remove/re-download cycle the model is a plain file under `models/` rather than a symlink,
+so it no longer occupies space inside `whisper.cpp/models/`.
+
 **Cleanup models are loaded onto the GPU** (`n_gpu_layers=99`), so their file size is
 roughly the VRAM they need, plus ~300 MB of compute buffer and KV cache. The listed sizes
 are there to be read before committing to a multi-GB download: on a 4 GB card, the 2.3 GB

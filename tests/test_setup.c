@@ -213,6 +213,30 @@ static void test_plan_removal(void)
     CHECK(r.bytes == 0, "a dangling link frees nothing");
     CHECK(setup_apply_removal(&r) == 0 && lstat(dangling, &st) != 0, "dangling link removed");
 
+    /* If the target cannot be deleted, the link must SURVIVE. Deleting it
+     * anyway would strand the bytes: nothing would name them, the row would
+     * read "missing", and re-downloading would allocate the space again. Forced
+     * by making the target's directory unwritable. */
+    char keepdir[128], keeptgt[256], keeplink[256];
+    snprintf(keepdir, sizeof(keepdir), "%s/locked", root);
+    mkdir(keepdir, 0700);
+    snprintf(keeptgt, sizeof(keeptgt), "%s/held.bin", keepdir);
+    f = fopen(keeptgt, "wb");
+    if (f) { fwrite("zzzzz", 1, 5, f); fclose(f); }
+    snprintf(keeplink, sizeof(keeplink), "%s/held-link.bin", subdir);
+    CHECK(symlink(keeptgt, keeplink) == 0, "symlink to a soon-to-be-locked target");
+    CHECK(setup_plan_removal(keeplink, root, &r) == 0 && r.target_inside, "plan the locked one");
+    CHECK(chmod(keepdir, 0500) == 0, "make the target's directory unwritable");
+
+    int rc_locked = setup_apply_removal(&r);
+    CHECK(rc_locked != 0, "a failed target delete is reported as failure");
+    CHECK(lstat(keeplink, &st) == 0,
+          "the link SURVIVES a failed target delete -- otherwise the bytes are stranded");
+    CHECK(stat(keeptgt, &st) == 0, "the target is still there too");
+
+    chmod(keepdir, 0700);
+    unlink(keeptgt); unlink(keeplink); rmdir(keepdir);
+
     /* Refusals. */
     CHECK(setup_plan_removal(subdir, root, &r) != 0 && !r.ok, "refuses a directory");
 

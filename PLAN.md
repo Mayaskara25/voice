@@ -298,6 +298,24 @@ Each phase ends with an explicit end-to-end manual test (described per-phase abo
   reports 0 MB freed; Cancel deletes nothing; rows flip to "missing" with `[Get]` afterwards.
   `configs/local.conf` was backed up and restored, and the real `models/` directory is
   byte-for-byte as it was.
+- **Deleting the link is now conditional on the target actually going**, which is a real fix
+  rather than a tidy-up. The code unlinked the link unconditionally while its own comment
+  claimed otherwise, so a failed target unlink (permissions, read-only mount) would have
+  removed the only name pointing at the file: the bytes would still be on disk, no row would
+  reference them, the entry would read "missing", and re-downloading would allocate the space a
+  *second* time — a silent disk leak that compounds per cycle. Keeping the link on failure
+  leaves the model working and visible so the error can be seen and retried. Covered by a test
+  that forces the failure with an unwritable target directory, and confirmed to have teeth by
+  restoring the old behaviour and watching exactly those assertions fail.
+- **Measured, not reasoned about: repeated download/delete cycles do not accumulate.** A
+  fixture reproducing the production layout (a *relative* symlink into a vendored directory,
+  plus a `file://` catalog entry so no network is involved) was cycled three times through
+  remove → re-download using the real `setup_apply_removal` and the real `--fetch-model`. Disk
+  usage returned to the identical byte count after every removal (20,971,630) and after every
+  download (41,943,150), with no orphans left anywhere in the tree. Worth noting what the first
+  cycle changes: the symlink is replaced by a **regular file** under `models/`, so from then on
+  the plan reports "removes the file" with no target, and the storage moves out of the vendored
+  directory permanently.
 - **A third instance of the same bug class, caught in review before shipping**: the delete
   dialog built its text with `n += snprintf(msg + n, sizeof(msg) - n, ...)`. `snprintf` returns
   what it *would* have written, so once anything truncates, `n` passes the buffer end, the

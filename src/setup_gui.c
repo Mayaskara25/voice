@@ -239,20 +239,25 @@ int setup_apply_removal(const struct model_removal *r)
         return -1;
     }
 
-    int rc = 0;
-    /* Target first: if it fails, the link is still there pointing at it, which
-     * is a more coherent state than an orphaned file with no name in models/. */
+    /* Target first, and the link ONLY if the target actually went. Deleting the
+     * link while its target survives would strand the bytes: nothing under
+     * models/ would name them any more, the row would read "missing", and
+     * re-downloading would allocate the space a second time. Keeping the link
+     * on failure leaves the model working and visible, so the user can see the
+     * error and retry -- the difference between a failed delete and a silent
+     * disk leak. */
     if (r->target[0] != '\0' && r->target_inside) {
         if (unlink(r->target) != 0) {
-            log_error("models: could not remove %s: %s", r->target, strerror(errno));
-            rc = -1;
+            log_error("models: could not remove %s: %s -- leaving %s in place so the "
+                      "file stays reachable", r->target, strerror(errno), r->link);
+            return -1;
         }
     }
     if (unlink(r->link) != 0) {
         log_error("models: could not remove %s: %s", r->link, strerror(errno));
-        rc = -1;
+        return -1;
     }
-    return rc;
+    return 0;
 }
 
 /* Opens the window on whatever the daemon would actually read, rather than on
