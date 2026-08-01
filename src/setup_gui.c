@@ -10,12 +10,14 @@
 #include <X11/keysym.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -35,8 +37,12 @@
 
 /* Same contract as SETUP_TITLE: the container key for the download prompt. */
 #define SETUP_PROMPT   "download prompt"
-#define SETUP_PROMPT_W 380
+/* Wide enough for an absolute model path on one line: the delete dialog names
+ * every file it will unlink, and a clipped path defeats the disclosure that
+ * makes the delete safe. The delete case is taller because it lists more. */
+#define SETUP_PROMPT_W 560
 #define SETUP_PROMPT_H 150
+#define SETUP_PROMPT_DEL_H 240
 
 /* Height reserved below the log pane for the Start row and the status lines. */
 #define SETUP_FOOTER  86
@@ -128,6 +134,125 @@ static void write_selection(struct setup_gui *g)
         snprintf(g->status, sizeof(g->status),
                  "could not write %s -- see the terminal", CONFIG_LOCAL_PATH);
     }
+}
+
+/* ------------------------------------------------------------ model removal */
+
+int setup_path_within(const char *path, const char *root)
+{
+    if (!path || !root || !*path || !*root)
+        return 0;
+
+    size_t rl = strlen(root);
+    while (rl > 1 && root[rl - 1] == '/')   /* "/a/b/" and "/a/b" are the same root */
+        rl--;
+
+    if (strncmp(path, root, rl) != 0)
+        return 0;
+    if (path[rl] == '\0')                   /* the root itself */
+        return 1;
+    /* The boundary test. Without it "/home/u/voice-backup" reads as inside
+     * "/home/u/voice", and this function authorises deletion. */
+    return path[rl] == '/' || (rl == 1 && root[0] == '/');
+}
+
+int setup_plan_removal(const char *path, const char *project_root,
+                       struct model_removal *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!path || !*path) {
+        snprintf(out->note, sizeof(out->note), "no path to remove");
+        return -1;
+    }
+    if (snprintf(out->link, sizeof(out->link), "%s", path) >= (int)sizeof(out->link)) {
+        snprintf(out->note, sizeof(out->note), "path is too long to handle safely");
+        return -1;
+    }
+
+    /* lstat, not stat: the question here is what *this* name is, not what it
+     * points at. stat() on a symlink would report the target and the link
+     * itself would never be recognised as one. */
+    struct stat lst;
+    if (lstat(path, &lst) != 0) {
+        snprintf(out->note, sizeof(out->note), "%s does not exist", path);
+        return -1;
+    }
+    if (S_ISDIR(lst.st_mode)) {
+        snprintf(out->note, sizeof(out->note),
+                 "%s is a directory -- refusing to remove it", path);
+        return -1;
+    }
+
+    if (S_ISLNK(lst.st_mode)) {
+        out->is_symlink = 1;
+        /* PATH_MAX, not CONFIG_PATH_MAX: realpath writes up to PATH_MAX bytes
+         * and does not know about our smaller buffer. */
+        char resolved[PATH_MAX];
+        if (!realpath(path, resolved)) {
+            /* Dangling link: nothing to free, but removing the stale link is
+             * still the right outcome, so allow it. */
+            out->ok = 1;
+            out->bytes = 0;
+            snprintf(out->note, sizeof(out->note),
+                     "dangling symlink -- removes the link only, nothing to free");
+            return 0;
+        }
+        if (strlen(resolved) >= sizeof(out->target)) {
+            snprintf(out->note, sizeof(out->note),
+                     "symlink target path is too long to handle safely");
+            return -1;
+        }
+        snprintf(out->target, sizeof(out->target), "%s", resolved);
+        out->target_inside = setup_path_within(resolved, project_root);
+    }
+
+    struct stat st;
+    long sz = (stat(path, &st) == 0 && S_ISREG(st.st_mode)) ? (long)st.st_size : 0;
+
+    if (!out->is_symlink) {
+        out->bytes = sz;
+        snprintf(out->note, sizeof(out->note), "removes the file");
+    } else if (out->target_inside) {
+        /* Where the space actually is. Files under models/ are commonly
+         * symlinks into whisper.cpp/models/ (the README's own `ln -sf` step,
+         * which is how large-v3-turbo arrives), so deleting
+         * only the link would free nothing while the row flipped to "missing"
+         * -- a display that lies about the disk. */
+        out->bytes = sz;
+        snprintf(out->note, sizeof(out->note), "removes the link and its target");
+    } else {
+        /* Points outside the project: not ours to delete. */
+        out->bytes = 0;
+        snprintf(out->note, sizeof(out->note),
+                 "target is outside the project -- removes the link only, "
+                 "and frees nothing");
+    }
+
+    out->ok = 1;
+    return 0;
+}
+
+int setup_apply_removal(const struct model_removal *r)
+{
+    if (!r || !r->ok) {
+        log_error("models: refusing to remove (%s)", r && r->note[0] ? r->note : "no plan");
+        return -1;
+    }
+
+    int rc = 0;
+    /* Target first: if it fails, the link is still there pointing at it, which
+     * is a more coherent state than an orphaned file with no name in models/. */
+    if (r->target[0] != '\0' && r->target_inside) {
+        if (unlink(r->target) != 0) {
+            log_error("models: could not remove %s: %s", r->target, strerror(errno));
+            rc = -1;
+        }
+    }
+    if (unlink(r->link) != 0) {
+        log_error("models: could not remove %s: %s", r->link, strerror(errno));
+        rc = -1;
+    }
+    return rc;
 }
 
 /* Opens the window on whatever the daemon would actually read, rather than on
@@ -418,6 +543,80 @@ static unsigned long alloc_pixel(struct setup_gui *g, mu_Color c)
     return xc.pixel;
 }
 
+/* Appends to a bounded buffer, returning the new length.
+ *
+ * snprintf returns what it WOULD have written, not what it did, so the obvious
+ * `n += snprintf(buf + n, sizeof(buf) - n, ...)` walks n past the buffer the
+ * moment anything truncates -- and then `sizeof(buf) - n` underflows (it is
+ * size_t) to a huge value while `buf + n` already points past the end, so the
+ * NEXT call writes off the end of the frame. The delete dialog concatenates a
+ * 96-byte display name and two CONFIG_PATH_MAX paths, which overruns a 640-byte
+ * buffer on a long enough --models-dir. Same clamping discipline logf_append
+ * uses. */
+static size_t msg_append(char *buf, size_t cap, size_t used, const char *fmt, ...)
+    __attribute__((format(printf, 4, 5)));
+
+static size_t msg_append(char *buf, size_t cap, size_t used, const char *fmt, ...)
+{
+    if (cap == 0 || used >= cap - 1)
+        return used;
+
+    va_list ap;
+    va_start(ap, fmt);
+    int w = vsnprintf(buf + used, cap - used, fmt, ap);
+    va_end(ap);
+    if (w < 0)
+        return used;
+
+    used += (size_t)w;
+    return used < cap ? used : cap - 1;   /* truncated: park at the NUL */
+}
+
+/* Works out what removing this entry entails and puts the dialog up. Nothing
+ * is deleted here: the plan is computed first precisely so the dialog can name
+ * every path before the user commits to anything. */
+static void open_delete_prompt(struct setup_gui *g, int index)
+{
+    struct model_entry *m = &g->cat->e[index];
+
+    if (setup_plan_removal(m->path, g->project_root, &g->prompt_removal) != 0) {
+        snprintf(g->status, sizeof(g->status), "cannot remove %s", m->filename);
+        logf_append(g, "cannot remove %s: %s\n", m->path, g->prompt_removal.note);
+        /* The plan can fail because the file vanished underneath us, so bring
+         * the displayed present/missing state back in line with the disk. */
+        catalog_refresh_presence(g->cat, g->models_dir);
+        return;
+    }
+
+    g->prompt_index   = index;
+    g->prompt_kind    = PROMPT_DELETE;
+    g->prompt_pending = 1;
+}
+
+static void do_delete(struct setup_gui *g, int index)
+{
+    struct model_entry *m = &g->cat->e[index];
+    const struct model_removal *r = &g->prompt_removal;
+    long freed = r->bytes;
+
+    if (setup_apply_removal(r) != 0) {
+        snprintf(g->status, sizeof(g->status), "could not remove %s -- see the terminal",
+                 m->filename);
+        logf_append(g, "failed to remove %s\n", m->path);
+    } else {
+        snprintf(g->status, sizeof(g->status), "removed %s (%ld MB freed)",
+                 m->filename, freed >> 20);
+        logf_append(g, "removed %s (%s, %ld MB freed)\n", r->link, r->note, freed >> 20);
+        if (r->target[0] != '\0' && r->target_inside)
+            logf_append(g, "  also removed %s\n", r->target);
+    }
+
+    /* Either way the disk may have changed; re-read it rather than assuming.
+     * The selection is deliberately left alone: a deleted model that is still
+     * selected now shows "missing", and Start offers to fetch it back. */
+    catalog_refresh_presence(g->cat, g->models_dir);
+}
+
 /* One catalog row: marker, name (selects), status, Get. Every row is wrapped in
  * a pushed id because mu_button derives its control id from the label string --
  * several buttons labelled "Get" in one container would otherwise collide, and
@@ -444,11 +643,16 @@ static void model_row(struct setup_gui *g, int index)
 
     mu_label(ctx, m->present ? "ready" : "missing");
 
+    /* Column 4 is the per-row action, and which one it is follows the state:
+     * [Get] on a missing model, [Remove] on one that is present. Both go inert
+     * while a download runs -- for [Remove] that is not cosmetic, since curl
+     * renaming its .part onto a path being unlinked concurrently is a race
+     * with no good outcome. */
+    int opt = MU_OPT_ALIGNCENTER | (g->dl_active ? MU_OPT_NOINTERACT : 0);
     if (m->present) {
-        mu_label(ctx, "");
+        if (mu_button_ex(ctx, "Remove", 0, opt) && !g->dl_active)
+            open_delete_prompt(g, index);
     } else {
-        /* One download at a time: the others go inert while one runs. */
-        int opt = MU_OPT_ALIGNCENTER | (g->dl_active ? MU_OPT_NOINTERACT : 0);
         if (mu_button_ex(ctx, "Get", 0, opt) && !g->dl_active)
             start_download(g, index);
     }
@@ -517,8 +721,9 @@ static void download_prompt(struct setup_gui *g)
     }
 
     const struct model_entry *m = &g->cat->e[g->prompt_index];
+    int want_h = (g->prompt_kind == PROMPT_DELETE) ? SETUP_PROMPT_DEL_H : SETUP_PROMPT_H;
     int w = g->width  < SETUP_PROMPT_W ? g->width  : SETUP_PROMPT_W;
-    int h = g->height < SETUP_PROMPT_H ? g->height : SETUP_PROMPT_H;
+    int h = g->height < want_h ? g->height : want_h;
     pc->rect = mu_rect((g->width - w) / 2, (g->height - h) / 2, w, h);
 
     if (!mu_begin_window_ex(ctx, SETUP_PROMPT, pc->rect,
@@ -526,33 +731,70 @@ static void download_prompt(struct setup_gui *g)
                             MU_OPT_NOTITLE | MU_OPT_NOCLOSE))
         return;
 
-    char msg[320];
-    snprintf(msg, sizeof(msg),
-             "%s is not downloaded yet.\n\nIt is needed before dictation can "
-             "start. Download it now (%ld MB)?",
-             m->display, m->size > 0 ? (long)(m->size >> 20) : 0L);
-
-    mu_layout_row(ctx, 1, (int[]){ -1 }, -34);
-    mu_text(ctx, msg);
-
-    mu_layout_row(ctx, 2, (int[]){ -110, -1 }, 0);
-
-    /* Inert while a download runs, exactly as [Get] is (there is one struct
-     * download, so a second start would overwrite the live one and orphan the
-     * running curl child along with its pipe fd). This is reachable: a click
-     * outside the dialog still activates the control behind it, so [Get] can be
-     * pressed with the dialog open, leaving a download running underneath it. */
+    /* Inert while a download runs. For Download that is because there is one
+     * struct download, so a second start would overwrite the live one and
+     * orphan the running curl child along with its pipe fd; for Delete it is
+     * because curl renaming its .part onto a path being unlinked concurrently
+     * is a race with no good outcome. Reachable either way: a click outside the
+     * dialog still activates the control behind it, so [Get] can be pressed
+     * with the dialog open, leaving a download running underneath it. */
     int busy = g->dl_active;
-    if (mu_button_ex(ctx, busy ? "Download now (busy)" : "Download now", 0,
-                     MU_OPT_ALIGNCENTER | (busy ? MU_OPT_NOINTERACT : 0)) && !busy) {
-        /* Reuses the same path the [Get] button takes -- one downloader, one
-         * set of states. Deliberately does NOT chain into starting the daemon
-         * when it finishes: silently launching after a multi-GB download is
-         * surprising, so the user presses Start again. */
-        start_download(g, g->prompt_index);
-        g->prompt_index = -1;
-        pc->open = 0;
+    char msg[640];
+
+    if (g->prompt_kind == PROMPT_DELETE) {
+        const struct model_removal *r = &g->prompt_removal;
+        size_t n = msg_append(msg, sizeof(msg), 0, "Remove %s?\n\n", m->display);
+
+        /* Every path that will be unlinked is named here. Disclosure is what
+         * makes the delete safe -- particularly for the symlink case, where
+         * what gets deleted is not the path shown in the model list. */
+        n = msg_append(msg, sizeof(msg), n, "deletes  %s\n", r->link);
+        if (r->target[0] != '\0')
+            n = msg_append(msg, sizeof(msg), n, "%s  %s\n",
+                           r->target_inside ? "deletes " : "keeps   ", r->target);
+        n = msg_append(msg, sizeof(msg), n, "frees    %ld MB\n", r->bytes >> 20);
+
+        /* The window's Start gate would catch a config pointing at a deleted
+         * model, but Super+D does not -- it goes straight to the script, to the
+         * daemon, to config_validate's fatal. Say so before, not after. */
+        if (g->prompt_index == g->sel_whisper || g->prompt_index == g->sel_llama)
+            n = msg_append(msg, sizeof(msg), n,
+                           "\nThis is the model your config uses: Super+D will fail "
+                           "until you pick another or re-download it.");
+        (void)n;
+
+        mu_layout_row(ctx, 1, (int[]){ -1 }, -34);
+        mu_text(ctx, msg);
+
+        mu_layout_row(ctx, 2, (int[]){ -110, -1 }, 0);
+        if (mu_button_ex(ctx, busy ? "Delete (busy)" : "Delete", 0,
+                         MU_OPT_ALIGNCENTER | (busy ? MU_OPT_NOINTERACT : 0)) && !busy) {
+            do_delete(g, g->prompt_index);
+            g->prompt_index = -1;
+            pc->open = 0;
+        }
+    } else {
+        snprintf(msg, sizeof(msg),
+                 "%s is not downloaded yet.\n\nIt is needed before dictation can "
+                 "start. Download it now (%ld MB)?",
+                 m->display, m->size > 0 ? (long)(m->size >> 20) : 0L);
+
+        mu_layout_row(ctx, 1, (int[]){ -1 }, -34);
+        mu_text(ctx, msg);
+
+        mu_layout_row(ctx, 2, (int[]){ -110, -1 }, 0);
+        if (mu_button_ex(ctx, busy ? "Download now (busy)" : "Download now", 0,
+                         MU_OPT_ALIGNCENTER | (busy ? MU_OPT_NOINTERACT : 0)) && !busy) {
+            /* Reuses the same path the [Get] button takes -- one downloader,
+             * one set of states. Deliberately does NOT chain into starting the
+             * daemon when it finishes: silently launching after a multi-GB
+             * download is surprising, so the user presses Start again. */
+            start_download(g, g->prompt_index);
+            g->prompt_index = -1;
+            pc->open = 0;
+        }
     }
+
     if (mu_button(ctx, "Cancel")) {
         g->prompt_index = -1;
         pc->open = 0;
@@ -669,8 +911,9 @@ static void render(struct setup_gui *g)
                      * makes the popup the hover root, without which this very
                      * click would immediately close it again (MU_OPT_POPUP
                      * closes on any press landing outside the container). */
-                    g->prompt_index = missing;
-                    mu_open_popup(ctx, SETUP_PROMPT);
+                    g->prompt_index   = missing;
+                    g->prompt_kind    = PROMPT_DOWNLOAD;
+                    g->prompt_pending = 1;
                 } else {
                     daemon_action(g, "start");
                 }
@@ -708,6 +951,13 @@ static void render(struct setup_gui *g)
          * compare against the wrong container, and the prompt closes on the
          * very frame it opens. It is not clipped by the parent: root containers
          * push unclipped_rect in begin_root_container. */
+        /* The single place the dialog is opened, deliberately right next to
+         * where it is drawn so the two can never drift to different id-stack
+         * depths again. */
+        if (g->prompt_pending) {
+            mu_open_popup(ctx, SETUP_PROMPT);
+            g->prompt_pending = 0;
+        }
         download_prompt(g);
 
         mu_end_window(ctx);
@@ -906,6 +1156,23 @@ int setup_gui_init(struct setup_gui *g, Display *dpy, struct model_catalog *cat,
     /* Explicit: the memset above leaves this 0, which is a *valid* catalog
      * index, so the prompt would be up the moment the window opened. */
     g->prompt_index = -1;
+    g->prompt_kind  = PROMPT_DOWNLOAD;
+
+    /* The containment anchor for deletes, resolved once. Comparing a resolved
+     * symlink target against an unresolved anchor gives false negatives when
+     * the project is reached through a symlinked path -- and a false negative
+     * here silently downgrades "delete the target too" to "delete the link and
+     * free nothing". Left empty if it cannot be resolved, which makes every
+     * target read as outside the project: the safe direction to fail. */
+    {
+        char resolved[PATH_MAX];
+        const char *anchor = (project_dir && *project_dir) ? project_dir : ".";
+        if (realpath(anchor, resolved) && strlen(resolved) < sizeof(g->project_root))
+            snprintf(g->project_root, sizeof(g->project_root), "%s", resolved);
+        else
+            log_warn("setup: cannot resolve project directory '%s' -- symlinked models "
+                     "will have their link removed but their target kept", anchor);
+    }
 
     preselect_from_config(g);
     find_script(g, project_dir);

@@ -33,6 +33,19 @@
 
 #define SETUP_MAX_COLORS 64
 
+/* What removing one model would actually delete. Filled by setup_plan_removal
+ * and shown verbatim in the confirmation dialog -- disclosure is what makes
+ * the delete safe, so every path that will be unlinked appears here. */
+struct model_removal {
+    char link[CONFIG_PATH_MAX];      /* the catalog path itself */
+    char target[CONFIG_PATH_MAX];    /* symlink target, resolved; "" if not a link */
+    long bytes;                      /* freed by actually doing it */
+    int  is_symlink;
+    int  target_inside;              /* target lies within the project -> delete it too */
+    int  ok;                         /* 0 = refuse; `note` says why */
+    char note[256];                  /* human-readable, for the dialog */
+};
+
 /* Ring capacity vs. how much of it is rendered. mu_text emits one text command
  * per wrapped line and microui hard-aborts if the 256 KB command list
  * overflows, so only the tail is drawn -- the rest stays available for
@@ -85,11 +98,29 @@ struct setup_gui {
     char status[192];
     int  running;
 
-    /* Catalog index of the model the "not downloaded yet" prompt is asking
-     * about, or -1 when no prompt is up. Visibility is tracked here rather than
-     * read back from microui because mu_get_container() *creates* a container
-     * with open=1 -- so merely looking the popup up would make it appear. */
+    /* Catalog index the confirmation dialog is asking about, or -1 when no
+     * dialog is up. Visibility is tracked here rather than read back from
+     * microui because mu_get_container() *creates* a container with open=1 --
+     * so merely looking the popup up would make it appear. */
     int prompt_index;
+    /* Which question it is asking. One dialog serves both: a second popup
+     * would mean a second container name, and the id-stack rules that makes
+     * easy to get wrong are not worth re-entering. */
+    enum { PROMPT_DOWNLOAD, PROMPT_DELETE } prompt_kind;
+    struct model_removal prompt_removal;  /* valid while prompt_kind==PROMPT_DELETE */
+    /* Set by whatever wants the dialog; the actual mu_open_popup happens in
+     * render() at window depth. Never call mu_open_popup from inside a control
+     * that sits within a pushed id (every catalog row does -- model_row wraps
+     * itself in mu_push_id): mu_get_id hashes from the top of the id stack, so
+     * the popup would be opened under a different container than the one drawn,
+     * and nothing would appear. */
+    int prompt_pending;
+
+    /* Resolved absolute project directory, the containment anchor for deletes.
+     * realpath'd once at init: comparing a resolved target against an
+     * unresolved anchor gives false negatives when the project is reached
+     * through a symlinked path. */
+    char project_root[CONFIG_PATH_MAX];
 
     /* daemon control (D4) */
     char  script_path[CONFIG_PATH_MAX];   /* <project>/scripts/waybar-dictation.sh */
@@ -134,5 +165,26 @@ const char *setup_log_view(const char *buf, size_t len, size_t view);
  * which is what the "none (raw whisper)" entry selects. Returns 0 or -1. */
 int setup_write_selection(const char *local, const char *example,
                           const char *whisper_path, const char *llama_path);
+
+/* True if `path` is `root` or sits underneath it. Both must already be
+ * resolved (realpath'd) -- this is deliberately pure string logic so it is
+ * testable without touching the filesystem.
+ *
+ * The next-byte check is the whole point: a plain strncmp() prefix test says
+ * "/home/u/voice-backup" is inside "/home/u/voice", which for a function that
+ * authorises deletion is the difference between removing a model and removing
+ * someone's backup. */
+int setup_path_within(const char *path, const char *root);
+
+/* Works out what removing `path` entails, without changing anything.
+ * `project_root` should be an already-resolved absolute directory; a target
+ * outside it is never deleted, only the link pointing at it. Returns 0 if the
+ * removal may proceed (out->ok == 1), -1 otherwise with out->note explaining. */
+int setup_plan_removal(const char *path, const char *project_root,
+                       struct model_removal *out);
+
+/* Performs the removal described by `r`. Returns 0, or -1 with the failure
+ * logged. Refuses unless r->ok. */
+int setup_apply_removal(const struct model_removal *r);
 
 #endif

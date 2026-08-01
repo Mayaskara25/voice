@@ -124,8 +124,19 @@ setup: $(SETUP_BIN)
 $(SETUP_BIN): $(SETUP_OBJS)
 	$(CC) $(SETUP_OBJS) -o $@ $(SETUP_LDLIBS)
 
+# Header dependency tracking. Without this, `%.o: %.c` has no .h prerequisites,
+# so editing a header rebuilds nothing and the link silently mixes objects
+# compiled against different versions of it. That is not a stale-comment
+# problem: adding a field to `struct setup_gui` produced one object allocating
+# the old (smaller) struct on the stack while another memset the new size over
+# it, scribbling past the end of the caller's frame. It presented as an
+# unrelated string going empty. -MMD writes a .d beside each .o; -MP adds
+# phony targets so a deleted/renamed header doesn't wedge the build.
+DEPFLAGS := -MMD -MP
+DEPS := $(OBJS:.o=.d) $(SETUP_OBJS:.o=.d) $(SETUP_ONLY_OBJS:.o=.d) $(TEST_SRCS:.c=.d)
+
 %.o: %.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # --- tests: small assert-based programs, no framework ---
 # test_stt decodes 16-bit PCM, but the vendored whisper.cpp ships samples/jfk.mp3
@@ -148,10 +159,15 @@ test: deps-whisper deps-llama $(SAMPLE_WAV) $(TEST_BINS)
 	done; exit $$rc
 
 $(TEST_BINS): tests/%: tests/%.c $(OBJS_TEST)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(OBJS_TEST) -o $@ $(LDLIBS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) $< $(OBJS_TEST) -o $@ $(LDLIBS)
+
+# Pull in the generated header dependencies. Must come after every target that
+# contributes to DEPS; the leading '-' keeps a fresh tree (no .d files yet)
+# from erroring.
+-include $(DEPS)
 
 clean:
-	rm -f $(OBJS) $(SETUP_OBJS) $(SETUP_ONLY_OBJS) $(BIN) $(SETUP_BIN) $(TEST_BINS)
+	rm -f $(OBJS) $(SETUP_OBJS) $(SETUP_ONLY_OBJS) $(BIN) $(SETUP_BIN) $(TEST_BINS) $(DEPS)
 
 distclean: clean
 	rm -rf $(WHISPER_BUILD) $(LLAMA_BUILD)

@@ -60,6 +60,15 @@ prompt offering to fetch it, rather than starting a daemon that would fail on th
 file. This covers the cleanup model too — a cleanup model is optional, but once one is
 *selected*, the daemon treats a missing file as fatal.
 
+**[Remove]** appears where **[Get]** does, on models that are already downloaded, and asks
+for confirmation first. The confirmation names every file it will delete, because that is
+not always the path shown in the list: models under `models/` are often symlinks into
+`whisper.cpp/models/` (that's what the `ln -sf` step below creates), so removing only the
+link would free nothing. The real file is deleted too **when it lives inside the project**;
+a symlink pointing outside has only its link removed, and the dialog says so and reports
+0 MB freed. Removing the model your config currently names is allowed, but it's called out
+in the dialog — Super+D would fail until you pick another or re-download it.
+
 **Cleanup models are loaded onto the GPU** (`n_gpu_layers=99`), so their file size is
 roughly the VRAM they need, plus ~300 MB of compute buffer and KV cache. The listed sizes
 are there to be read before committing to a multi-GB download: on a 4 GB card, the 2.3 GB

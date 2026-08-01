@@ -233,6 +233,92 @@ Each phase ends with an explicit end-to-end manual test (described per-phase abo
 
 ## Progress log
 
+### Phase D follow-up — removing models, and a Makefile bug worth more than the feature (done)
+
+- **`[Remove]` sits where `[Get]` sits.** The row already had a fourth column that was an empty
+  label for present entries, so the action column now simply follows the state: `[Get]` when
+  missing, `[Remove]` when present. No layout change, and `model_row()`'s existing `mu_push_id`
+  already prevents the per-row id collisions.
+- **Deleting is confirmed, and the dialog names every path it will unlink.** That disclosure is
+  the safety mechanism, not a nicety: for a symlinked model the file actually removed is *not*
+  the path shown in the model list. The dialog reuses the download prompt's container with a
+  `prompt_kind`, rather than adding a second popup.
+- **The symlink policy, which is the whole design question.** `models/*.bin` here are commonly
+  symlinks into `whisper.cpp/models/` — that is what the README's own `ln -sf` step creates, and
+  on this machine 2.1 GB of models live behind them. Unlinking only the link would free **zero
+  bytes** while the row flipped to "missing": a display that lies about the disk. So the target
+  is deleted too, but **only when it resolves inside the project**; a target outside is left
+  alone and the dialog says "keeps" next to it and reports 0 MB freed. Checked first that these
+  targets are untracked and gitignored (`whisper.cpp/models/.gitignore:1`), so deleting them
+  cannot dirty the tree.
+- **The containment test is where the bug would have been.** A plain `strncmp` prefix check says
+  `/home/u/voice-backup` is inside `/home/u/voice` — in a function that authorises deletion.
+  `setup_path_within()` requires the next byte to be `/` or the strings to be equal, and both
+  sides are `realpath`'d first (comparing a resolved target against an unresolved anchor gives
+  false negatives when the project is reached through a symlinked path). The anchor is resolved
+  once at init; if it cannot be resolved it is left empty, which makes every target read as
+  *outside* — the safe direction to fail.
+- **Deleting the selected model warns about Super+D specifically.** The window's own Start gate
+  catches a config naming a deleted file, but the keybind does not: it goes straight to the
+  script, to the daemon, to `config_validate`'s fatal, and the user gets a dictation key that
+  silently stopped working. The dialog says so before the delete, not after. The selection is
+  deliberately left pointing at the deleted entry, which now reads "missing", so Start offers to
+  fetch it back.
+- **`setup_path_within`, `setup_plan_removal` and `setup_apply_removal` are exported and unit
+  tested** (`tests/test_setup.c`, no Display needed) across plain file, symlink-inside,
+  symlink-outside, dangling symlink, directory, missing file and empty path — the cases a click
+  through the window never reaches. The prefix-boundary assertions were confirmed to have teeth
+  by replacing the check with `return 1` and watching exactly those two assertions fail.
+- **The Makefile had no header dependencies, and it corrupted memory.** `%.o: %.c` listed no
+  `.h` prerequisites, so editing a header rebuilt nothing. Adding a field to `struct setup_gui`
+  left `setup_main.o` allocating the *old, smaller* struct on the stack while the freshly built
+  `setup_gui.o` did `memset(g, 0, sizeof(*g))` at the *new, larger* size — writing past the end
+  of the caller's frame and zeroing `main`'s `project_dir`, which surfaced as the launcher
+  script suddenly being looked for at `/scripts/waybar-dictation.sh`. That is a silent
+  ODR-style mismatch that any future header edit could reproduce anywhere in the project, so it
+  is fixed properly with `-MMD -MP` and `-include $(DEPS)`, `.d` files added to `clean` and
+  `.gitignore`, and the whole tree rebuilt from clean so no stale object survives. Verified:
+  touching `setup_gui.h` now rebuilds `setup_main.o` as well, where before it rebuilt nothing.
+- **The id-stack trap caught me a second time, from the other direction.** `model_row()` wraps
+  each row in `mu_push_id`, so `mu_open_popup(SETUP_PROMPT)` called from `[Remove]` hashed to a
+  different container than the one drawn at window depth, and the dialog silently never
+  appeared. (The Start button had worked only because it happens to sit at window depth.)
+  Rather than patch the call site, opening is now deferred through a `prompt_pending` flag and
+  performed in exactly one place in `render()`, immediately above where the dialog is drawn, so
+  the two cannot drift apart again.
+- The dialog is 560px wide and taller for the delete case, because an absolute model path was
+  being clipped at the old 380px — a clipped path defeats the disclosure the confirmation
+  exists to provide.
+- `[Remove]` is inert while a download runs, mirroring `[Get]`: curl renaming its `.part` onto a
+  path being unlinked concurrently is a race with no good outcome.
+- **Verified live against a scratch `--models-dir`, never the real models** (a mistaken delete
+  there costs a 1.6 GB re-download and there is no undo): plain file frees its own size;
+  in-project symlink removes both link and target and frees the target's size; out-of-project
+  symlink removes the link, **leaves the target on disk** (checked directly) and honestly
+  reports 0 MB freed; Cancel deletes nothing; rows flip to "missing" with `[Get]` afterwards.
+  `configs/local.conf` was backed up and restored, and the real `models/` directory is
+  byte-for-byte as it was.
+- **A third instance of the same bug class, caught in review before shipping**: the delete
+  dialog built its text with `n += snprintf(msg + n, sizeof(msg) - n, ...)`. `snprintf` returns
+  what it *would* have written, so once anything truncates, `n` passes the buffer end, the
+  `size_t` subtraction underflows to a huge value, and the next call writes off the frame. It
+  concatenates a 96-byte display name and two `CONFIG_PATH_MAX` paths against a 640-byte buffer,
+  so a long enough `--models-dir` reaches it. Replaced with a clamping `msg_append()` helper.
+- **The production symlink form is relative, and the first round of tests only used absolute
+  targets.** `models/x.bin -> ../whisper.cpp/models/x.bin` is what `ln -sf` creates and what is
+  on disk. A relative-symlink fixture is now in `test_plan_removal`, asserting the target still
+  resolves as inside the project, still reports the target's size, and that the stored path is
+  fully resolved rather than containing `..`. Two couplings it pins: `realpath` resolves a
+  relative link against the *link's* directory, and resolves the relative `./models/...` catalog
+  path against the CWD, which only works because of the startup `chdir`.
+- **The daemon binary was rebuilt by `make clean` and had never been run**, so it was smoke
+  tested through the real launcher script rather than assumed good: `waybar-dictation.sh start`
+  → both models loaded → `dictation: ready` → `status` reports `active` → `stop` → `notactive`.
+  Left stopped.
+- Pre-existing warning surfaced by the first full rebuild in a while, left alone because it is
+  in the daemon and unrelated to this work: `src/hotkey_evdev.c:166` `-Wformat-truncation` on a
+  `%s` into a 300-byte buffer. Worth its own commit.
+
 ### Phase D follow-up — more models, and a download prompt on Start (done)
 
 - **Four catalog entries added**, all sizes taken from the real `content-length` rather than

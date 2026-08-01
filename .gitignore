@@ -6,6 +6,7 @@ models/*.gguf
 # generated from the vendored jfk.mp3 by `make test` (test_stt wants PCM)
 whisper.cpp/samples/jfk.wav
 *.o
+*.d
 /dictation
 /dictation-setup
 

@@ -110,11 +110,134 @@ static void test_write_selection(void)
     rmdir(dir);
 }
 
+/* Pure string logic, so every awkward boundary is cheap to assert -- and these
+ * are exactly the cases clicking through the window would never reach. */
+static void test_path_within(void)
+{
+    CHECK(setup_path_within("/home/u/voice/models/a.bin", "/home/u/voice") == 1,
+          "a file under the root is inside it");
+    CHECK(setup_path_within("/home/u/voice", "/home/u/voice") == 1,
+          "the root itself counts as inside");
+    CHECK(setup_path_within("/home/u/voice/", "/home/u/voice") == 1,
+          "trailing slash on the path");
+    CHECK(setup_path_within("/home/u/voice/models/a.bin", "/home/u/voice/") == 1,
+          "trailing slash on the root");
+
+    /* The one that matters: a plain strncmp() prefix test passes this, and
+     * this function authorises deletion. */
+    CHECK(setup_path_within("/home/u/voice-backup/models/a.bin", "/home/u/voice") == 0,
+          "a sibling sharing a name prefix is NOT inside");
+    CHECK(setup_path_within("/home/u/voicex", "/home/u/voice") == 0,
+          "prefix without a separator is NOT inside");
+
+    CHECK(setup_path_within("/etc/passwd", "/home/u/voice") == 0,
+          "an unrelated path is outside");
+    CHECK(setup_path_within("/home/u/voice/models/a.bin", "") == 0,
+          "an empty root matches nothing (fails safe)");
+    CHECK(setup_path_within("", "/home/u/voice") == 0, "an empty path matches nothing");
+    CHECK(setup_path_within(NULL, "/home/u/voice") == 0, "NULL is handled");
+}
+
+static void test_plan_removal(void)
+{
+    char dir[] = "/tmp/dictation_rm_XXXXXX";
+    CHECK(mkdtemp(dir) != NULL, "scratch dir");
+
+    /* Graded sizes so the compiler can prove each snprintf fits -- otherwise
+     * -Wformat-truncation fires on every one of these and the build stops
+     * being warning-clean. */
+    char root[64], subdir[128], outside_dir[128];
+    char inside[192], link_in[256], outside[256], link_out[256], dangling[256], missing[256];
+    char link_inside[256];
+    snprintf(root, sizeof(root), "%s/project", dir);
+    snprintf(subdir, sizeof(subdir), "%s/models", root);
+    mkdir(root, 0700);
+    mkdir(subdir, 0700);
+
+    snprintf(inside, sizeof(inside), "%s/real.bin", root);
+    FILE *f = fopen(inside, "wb");
+    if (f) { fwrite("0123456789", 1, 10, f); fclose(f); }
+
+    /* A plain file. */
+    snprintf(link_in, sizeof(link_in), "%s/plain.bin", subdir);
+    f = fopen(link_in, "wb");
+    if (f) { fwrite("abcd", 1, 4, f); fclose(f); }
+
+    struct model_removal r;
+    CHECK(setup_plan_removal(link_in, root, &r) == 0 && r.ok, "plain file can be removed");
+    CHECK(!r.is_symlink && r.target[0] == '\0', "plain file has no target");
+    CHECK(r.bytes == 4, "plain file frees its own size");
+
+    /* A symlink whose target is inside the project: both go. */
+
+    snprintf(link_inside, sizeof(link_inside), "%s/linked.bin", subdir);
+    CHECK(symlink(inside, link_inside) == 0, "symlink into the project");
+    CHECK(setup_plan_removal(link_inside, root, &r) == 0 && r.ok, "linked model can be removed");
+    CHECK(r.is_symlink && r.target_inside, "target recognised as inside the project");
+    CHECK(r.bytes == 10, "frees the TARGET's size, not the link's");
+
+    /* A RELATIVE symlink -- the form the README's `ln -sf` actually creates
+     * (models/x.bin -> ../whisper.cpp/models/x.bin), and so the form that runs
+     * in production. realpath resolves it against the *link's* directory, not
+     * the CWD, which is the coupling worth pinning down. */
+    char rel_link[256];
+    snprintf(rel_link, sizeof(rel_link), "%s/relative.bin", subdir);
+    CHECK(symlink("../real.bin", rel_link) == 0, "relative symlink into the project");
+    CHECK(setup_plan_removal(rel_link, root, &r) == 0 && r.ok, "relative link can be removed");
+    CHECK(r.is_symlink && r.target_inside,
+          "a relative target still resolves as inside the project");
+    CHECK(r.bytes == 10, "a relative link frees the target's size");
+    CHECK(strstr(r.target, "..") == NULL, "the stored target is fully resolved, not '..'-relative");
+
+    /* A symlink pointing outside: the link goes, the target must not. */
+    snprintf(outside_dir, sizeof(outside_dir), "%s/elsewhere", dir);
+    mkdir(outside_dir, 0700);
+    snprintf(outside, sizeof(outside), "%s/other.bin", outside_dir);
+    f = fopen(outside, "wb");
+    if (f) { fwrite("xxxxxxx", 1, 7, f); fclose(f); }
+    snprintf(link_out, sizeof(link_out), "%s/external.bin", subdir);
+    CHECK(symlink(outside, link_out) == 0, "symlink out of the project");
+    CHECK(setup_plan_removal(link_out, root, &r) == 0 && r.ok, "external link can be removed");
+    CHECK(r.is_symlink && !r.target_inside, "target recognised as outside the project");
+    CHECK(r.bytes == 0, "an outside target frees nothing, because it is kept");
+
+    CHECK(setup_apply_removal(&r) == 0, "removing an external link succeeds");
+    struct stat st;
+    CHECK(stat(outside, &st) == 0, "the OUTSIDE target survives -- not ours to delete");
+    CHECK(lstat(link_out, &st) != 0, "the link itself is gone");
+
+    /* Dangling link: nothing to free, but clearing the stale name is right. */
+    snprintf(dangling, sizeof(dangling), "%s/dangling.bin", subdir);
+    CHECK(symlink("/nonexistent/nope.bin", dangling) == 0, "dangling symlink");
+    CHECK(setup_plan_removal(dangling, root, &r) == 0 && r.ok, "a dangling link may be removed");
+    CHECK(r.bytes == 0, "a dangling link frees nothing");
+    CHECK(setup_apply_removal(&r) == 0 && lstat(dangling, &st) != 0, "dangling link removed");
+
+    /* Refusals. */
+    CHECK(setup_plan_removal(subdir, root, &r) != 0 && !r.ok, "refuses a directory");
+
+    snprintf(missing, sizeof(missing), "%s/nope.bin", subdir);
+    CHECK(setup_plan_removal(missing, root, &r) != 0 && !r.ok, "refuses a missing file");
+    CHECK(setup_plan_removal("", root, &r) != 0, "refuses an empty path");
+    CHECK(setup_apply_removal(&r) != 0, "apply refuses a plan that was not ok");
+
+    /* Now really delete the in-project link and confirm the target went too. */
+    CHECK(setup_plan_removal(link_inside, root, &r) == 0, "re-plan the linked model");
+    CHECK(setup_apply_removal(&r) == 0, "removing a linked model succeeds");
+    CHECK(lstat(link_inside, &st) != 0, "the link is gone");
+    CHECK(stat(inside, &st) != 0, "the in-project target is gone too");
+
+    unlink(link_in); unlink(outside); unlink(rel_link);
+    rmdir(outside_dir); rmdir(subdir); rmdir(root); rmdir(dir);
+}
+
 int main(void)
 {
     test_log_ring();
     test_log_view();
     test_write_selection();
+    test_path_within();
+    test_plan_removal();
 
     if (failures) { fprintf(stderr, "test_setup: %d failure(s)\n", failures); return 1; }
     printf("test_setup: OK\n");
