@@ -233,6 +233,97 @@ Each phase ends with an explicit end-to-end manual test (described per-phase abo
 
 ## Progress log
 
+### Phase D follow-up — more models, and a download prompt on Start (done)
+
+- **Four catalog entries added**, all sizes taken from the real `content-length` rather than
+  estimated: whisper `large-v3-turbo` (unquantized, 1624555275) and `medium.en` (1533774781);
+  llama `gemma-3n-e2b-q3km` (2483178848) and `gemma-3n-e2b-q4km` (3026881888). The
+  `large-v3-turbo` figure was independently confirmed against the copy already on disk — the
+  local file is exactly 1624555275 bytes, matching the header — which is a free check that the
+  URL and the entry really refer to the same artifact.
+- **"gemma4 e2b" is Gemma 3n E2B.** There is no Gemma 4; E2B is Gemma 3n's MatFormer
+  designation for ~2B *effective* parameters out of ~5B raw, which is why a "2B" model is a
+  2.3–2.8 GB file rather than ~1 GB. Checked before adding it that the pinned llama.cpp can
+  actually load one: `LLM_ARCH_GEMMA3N` is in `llama-arch.cpp` and `src/models/gemma3n.cpp`
+  exists. A catalog entry for an architecture the vendored runtime cannot load would be a
+  multi-GB download ending in a load failure.
+- **VRAM is the real constraint, so it is in the display names.** Whisper runs on the CPU
+  backend here, but cleanup models go on the GPU at `n_gpu_layers=99`, and this machine's GTX
+  1650 has 4096 MiB. Q4_K_M (2.8 GB) plus the ~300 MB compute buffer and KV cache is tight;
+  Q3_K_M (2.3 GB) is comfortable. **Both** are listed rather than one being chosen, since the
+  catalog is data and picking should be a click, not an edit. The sizes and the "tight on 4 GB
+  VRAM" note live in the `display` field because that is the only place the user sees them
+  before committing to the download.
+- **No dropdown.** microui has no combobox, and building one out of `mu_open_popup` would be
+  the most code for the least benefit at seven rows. The existing flat radio rows were kept —
+  `model_row()` already handles the id collisions correctly via `mu_push_id`. If either list
+  passes roughly 8–10 entries, wrap that section in `mu_begin_panel` with a fixed height (three
+  lines); deferred until it is real rather than done speculatively.
+- **Start now prompts instead of being inert.** This is a deliberate deviation from the
+  locked-in "Start is gated" decision above, and the gate's *purpose* is preserved exactly: a
+  click never starts a daemon that would hit `config_validate`'s fatal. Start becomes clickable
+  when a selected model is merely *missing*, and that click opens a centred confirm dialog
+  ("… is not downloaded yet … Download it now (N MB)?") whose confirm button reuses the same
+  `start_download()` the `[Get]` buttons call. It stays inert with nothing selected, no launcher
+  script, or a download already running. It deliberately does **not** chain into starting the
+  daemon when the download finishes — silently launching after a multi-GB fetch is surprising,
+  so the user presses Start again.
+- **A real pre-existing hole was found and closed while doing it**: the old gate checked only
+  the whisper model, but `config_validate` (`src/config.c:148-152`) treats a `llama_model_path`
+  naming a missing file as fatal. So selecting an undownloaded *cleanup* model and pressing
+  Start produced precisely the error Phase D exists to eliminate. `first_missing_required()`
+  now checks both, whisper first. A blank llama path (the "none (raw whisper)" row) still never
+  gates Start. Verified live: with a present whisper model and a missing Gemma selected, Start
+  opens the prompt naming the Gemma rather than starting the daemon.
+- **microui gotcha worth recording, because it cost a debugging round and would recur.**
+  `mu_begin_window_ex` pushes the window's id onto the id stack (`microui.c:1088`) and
+  `mu_get_id` seeds its hash from the top of that stack (`microui.c:232`). So the *same* popup
+  name resolves to **different containers** depending on whether the call sits inside or outside
+  the enclosing `mu_begin_window`/`mu_end_window` pair. The first version opened the popup from
+  inside the window and drew it from outside: `mu_open_popup` set `hover_root` on container A
+  while container B was drawn, so `MU_OPT_POPUP`'s "close when a press lands elsewhere" test
+  compared against the wrong container and closed the dialog on the very frame it opened —
+  presenting as a Start button that simply did nothing. Both calls must sit at the same
+  id-stack depth; microui's own demo does exactly this. Being nested does not clip the popup:
+  `begin_root_container` pushes `unclipped_rect`.
+- `mu_get_container()` **creates** a container with `open = 1`, so popup visibility is tracked
+  in `prompt_index` rather than read back from microui — merely looking the container up in
+  order to ask "is it open?" would make it appear. For the same reason `prompt_index` is set to
+  -1 explicitly in `setup_gui_init`: the `memset` there leaves 0, which is a valid catalog
+  index, and the dialog would have been up the moment the window opened.
+- **A second bug, found by asking what happens if a download is already running.** The dialog
+  does *not* reliably block clicks on the controls behind it — observed directly: a click on a
+  model row while the dialog was open selected that row. So `[Get]` can be pressed with the
+  dialog still up, leaving a download running underneath it, and the dialog's confirm button had
+  no `!dl_active` guard where `[Get]` (`setup_gui.c:453`) has one. Pressing it would have called
+  `start_download` over a live `struct download`, orphaning the running curl child and leaking
+  its pipe fd. The confirm button is now inert and relabelled "Download now (busy)" while a
+  download runs, mirroring `[Get]`.
+- The `why` line gained a `dl_active` case. Start is disabled during a download, and without it
+  the button was simply dead while the line underneath explained something else entirely; it now
+  reads "downloading; Start waits until it finishes".
+- **The headless path was re-checked with the new ids**, since the README presents it as the
+  no-X fallback: `--fetch-model large-v3-turbo` reports "already at
+  ./models/ggml-large-v3-turbo.bin" rather than resolving to the `large-v3-turbo-q5_0` entry it
+  is a strict prefix of — `catalog_find` was read as exact `strcmp`, but this is the check that
+  the *chosen ids* behave. `--fetch-model gemma-3n-e2b-q3km` fetched from the right URL with the
+  catalog's expected size, and SIGINT left no `.part` and no orphaned curl. An unknown id
+  (`gemma4-e2b`, the name this all started from) is still rejected with a pointer to `--list`.
+- **Test-harness note, not a user-facing bug**: microui resolves `hover_root` one frame behind,
+  so a synthesized single move+press onto a *newly appeared* popup is ignored — the press is
+  evaluated while `hover_root` is still the main window. The XSendEvent driver therefore needs a
+  separate hover frame before the click. A real pointer generates motion events continuously on
+  its way to the button, and the dialog is centred while Start is bottom-left, so the cursor is
+  never already over it when it appears.
+- Verified live end to end with screenshots at each step: all seven rows render with correct
+  present/missing status and the size/VRAM hints fit the name column; no dialog on startup;
+  Start on a missing whisper model opens the prompt; Cancel dismisses it; Start on a missing
+  cleanup model names the cleanup model; **Download now** launched curl with the correct
+  `--fail`/`.part` command line, streamed its meter into the pane and drove the progress bar.
+  The download was then cancelled, the `.part` file was removed by the existing cancel path, and
+  `configs/local.conf` was restored to the models it named beforehand. `make test` green across
+  all ten suites.
+
 ### Phase D5 — desktop integration (done)
 
 Phase D's sub-phases D0–D5 are all complete. Of the four Done-when criteria at the top of the

@@ -33,6 +33,11 @@
  * mu_get_container and mu_begin_window_ex. */
 #define SETUP_TITLE   "dictation setup"
 
+/* Same contract as SETUP_TITLE: the container key for the download prompt. */
+#define SETUP_PROMPT   "download prompt"
+#define SETUP_PROMPT_W 380
+#define SETUP_PROMPT_H 150
+
 /* Height reserved below the log pane for the Start row and the status lines. */
 #define SETUP_FOOTER  86
 
@@ -468,6 +473,94 @@ static void none_row(struct setup_gui *g)
     mu_pop_id(ctx);
 }
 
+/* Catalog index of the first selected-but-not-downloaded model, or -1 if
+ * everything the daemon will need is on disk. Whisper is checked first so the
+ * prompt names it first.
+ *
+ * The cleanup model is checked too, which the original Start gate did not do.
+ * That was a real hole: config_validate() (src/config.c:148-152) treats a
+ * llama_model_path naming a missing file as fatal, so selecting an
+ * undownloaded cleanup model and pressing Start produced exactly the
+ * config_validate fatal this phase exists to remove. A *blank* llama path is
+ * still fine -- that is the "none (raw whisper)" row, and it must never gate
+ * Start. */
+static int first_missing_required(const struct setup_gui *g)
+{
+    if (g->sel_whisper >= 0 && !g->cat->e[g->sel_whisper].present)
+        return g->sel_whisper;
+    if (g->sel_llama >= 0 && !g->cat->e[g->sel_llama].present)
+        return g->sel_llama;
+    return -1;
+}
+
+/* The "that model isn't downloaded yet" prompt.
+ *
+ * Deliberately NOT mu_begin_popup(): that hardcodes MU_OPT_AUTOSIZE and
+ * mu_open_popup() anchors at the mouse, which puts the box at the Start button
+ * -- bottom-left, where it would grow straight off the bottom edge. Using
+ * mu_begin_window_ex directly gives a fixed size that can be centred, with the
+ * rect re-asserted every frame (the same technique the root window needs at
+ * the top of render(), and for the same reason).
+ *
+ * MU_OPT_POPUP is kept so a click outside dismisses it; microui signals that by
+ * clearing cnt->open, which is read back BEFORE the rect is re-asserted. */
+static void download_prompt(struct setup_gui *g)
+{
+    mu_Context *ctx = g->ctx;
+    if (g->prompt_index < 0)
+        return;
+
+    mu_Container *pc = mu_get_container(ctx, SETUP_PROMPT);
+    if (!pc || !pc->open) {          /* dismissed by clicking elsewhere */
+        g->prompt_index = -1;
+        return;
+    }
+
+    const struct model_entry *m = &g->cat->e[g->prompt_index];
+    int w = g->width  < SETUP_PROMPT_W ? g->width  : SETUP_PROMPT_W;
+    int h = g->height < SETUP_PROMPT_H ? g->height : SETUP_PROMPT_H;
+    pc->rect = mu_rect((g->width - w) / 2, (g->height - h) / 2, w, h);
+
+    if (!mu_begin_window_ex(ctx, SETUP_PROMPT, pc->rect,
+                            MU_OPT_POPUP | MU_OPT_NORESIZE | MU_OPT_NOSCROLL |
+                            MU_OPT_NOTITLE | MU_OPT_NOCLOSE))
+        return;
+
+    char msg[320];
+    snprintf(msg, sizeof(msg),
+             "%s is not downloaded yet.\n\nIt is needed before dictation can "
+             "start. Download it now (%ld MB)?",
+             m->display, m->size > 0 ? (long)(m->size >> 20) : 0L);
+
+    mu_layout_row(ctx, 1, (int[]){ -1 }, -34);
+    mu_text(ctx, msg);
+
+    mu_layout_row(ctx, 2, (int[]){ -110, -1 }, 0);
+
+    /* Inert while a download runs, exactly as [Get] is (there is one struct
+     * download, so a second start would overwrite the live one and orphan the
+     * running curl child along with its pipe fd). This is reachable: a click
+     * outside the dialog still activates the control behind it, so [Get] can be
+     * pressed with the dialog open, leaving a download running underneath it. */
+    int busy = g->dl_active;
+    if (mu_button_ex(ctx, busy ? "Download now (busy)" : "Download now", 0,
+                     MU_OPT_ALIGNCENTER | (busy ? MU_OPT_NOINTERACT : 0)) && !busy) {
+        /* Reuses the same path the [Get] button takes -- one downloader, one
+         * set of states. Deliberately does NOT chain into starting the daemon
+         * when it finishes: silently launching after a multi-GB download is
+         * surprising, so the user presses Start again. */
+        start_download(g, g->prompt_index);
+        g->prompt_index = -1;
+        pc->open = 0;
+    }
+    if (mu_button(ctx, "Cancel")) {
+        g->prompt_index = -1;
+        pc->open = 0;
+    }
+
+    mu_end_window(ctx);
+}
+
 /* microui has no progress widget; this is the ~8 lines it would be. */
 static void progress_bar(struct setup_gui *g)
 {
@@ -546,8 +639,17 @@ static void render(struct setup_gui *g)
         }
         mu_end_panel(ctx);
 
-        int can_start = g->sel_whisper >= 0 && g->cat->e[g->sel_whisper].present;
+        int missing   = first_missing_required(g);
+        int can_start = g->sel_whisper >= 0 && missing < 0;
         int is_up = (g->daemon == DAEMON_READY || g->daemon == DAEMON_LOADING);
+
+        /* Clickable when a model is merely *missing*, so the prompt can offer to
+         * fetch it -- but still inert with nothing selected, no launcher script,
+         * or a download already running. The original gate's purpose (never hand
+         * the user config_validate's fatal from behind a button) is preserved:
+         * a click with something missing opens the prompt, it does not start
+         * the daemon. */
+        int start_ok = g->sel_whisper >= 0 && g->script_ok && !g->dl_active;
 
         mu_layout_row(ctx, 2, (int[]){ 150, -1 }, 0);
         if (is_up) {
@@ -560,27 +662,57 @@ static void render(struct setup_gui *g)
              * names models a fresh clone doesn't have. An ungated Start would
              * hand the user config_validate's fatal error -- exactly the
              * failure this phase exists to remove -- from behind a button. */
-            int opt = MU_OPT_ALIGNCENTER |
-                      ((can_start && g->script_ok) ? 0 : MU_OPT_NOINTERACT);
-            if (mu_button_ex(ctx, "Start dictation", 0, opt) && can_start && g->script_ok)
-                daemon_action(g, "start");
+            int opt = MU_OPT_ALIGNCENTER | (start_ok ? 0 : MU_OPT_NOINTERACT);
+            if (mu_button_ex(ctx, "Start dictation", 0, opt) && start_ok) {
+                if (missing >= 0) {
+                    /* mu_open_popup, not just setting prompt_index: it also
+                     * makes the popup the hover root, without which this very
+                     * click would immediately close it again (MU_OPT_POPUP
+                     * closes on any press landing outside the container). */
+                    g->prompt_index = missing;
+                    mu_open_popup(ctx, SETUP_PROMPT);
+                } else {
+                    daemon_action(g, "start");
+                }
+            }
         }
 
         char why[192];
         if (!g->script_ok)
             snprintf(why, sizeof(why), "scripts/waybar-dictation.sh not found -- "
                                        "Start/Stop unavailable");
-        else if (!is_up && !can_start)
-            snprintf(why, sizeof(why), "daemon: %s -- Start needs the selected whisper model",
+        /* Without this the button is simply dead during a download, with the
+         * line below it explaining something else entirely. */
+        else if (!is_up && g->dl_active)
+            snprintf(why, sizeof(why), "daemon: %s -- downloading; Start waits until it finishes",
                      daemon_state_text(g->daemon));
+        else if (!is_up && g->sel_whisper < 0)
+            snprintf(why, sizeof(why), "daemon: %s -- pick a whisper model first",
+                     daemon_state_text(g->daemon));
+        else if (!is_up && !can_start)
+            snprintf(why, sizeof(why), "daemon: %s -- %s still needs downloading",
+                     daemon_state_text(g->daemon), g->cat->e[missing].filename);
         else
             snprintf(why, sizeof(why), "daemon: %s", daemon_state_text(g->daemon));
         mu_label(ctx, why);
 
         mu_layout_row(ctx, 1, (int[]){ -1 }, 0);
         mu_label(ctx, g->status);
+
+        /* Must be inside the window, at the same id-stack depth as the
+         * mu_open_popup call above -- mu_begin_window_ex pushes the window's id
+         * (microui.c:1088) and mu_get_id seeds its hash from the top of that
+         * stack (microui.c:232), so the *same* name outside this block hashes
+         * to a different container. Opening one container while drawing another
+         * makes MU_OPT_POPUP's "close when a press lands elsewhere" test
+         * compare against the wrong container, and the prompt closes on the
+         * very frame it opens. It is not clipped by the parent: root containers
+         * push unclipped_rect in begin_root_container. */
+        download_prompt(g);
+
         mu_end_window(ctx);
     }
+
     mu_end(ctx);
 
     /* ---- rasterize into the backbuffer (same as gui_xlib.c) ---- */
@@ -770,6 +902,10 @@ int setup_gui_init(struct setup_gui *g, Display *dpy, struct model_catalog *cat,
     g->ctx->style->font = (mu_Font)g->font.fs;
     /* Default control height is 20px, which crowds a 15px font. */
     g->ctx->style->size.y = 16;
+
+    /* Explicit: the memset above leaves this 0, which is a *valid* catalog
+     * index, so the prompt would be up the moment the window opened. */
+    g->prompt_index = -1;
 
     preselect_from_config(g);
     find_script(g, project_dir);

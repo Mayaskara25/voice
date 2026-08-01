@@ -85,6 +85,12 @@ struct setup_gui {
     char status[192];
     int  running;
 
+    /* Catalog index of the model the "not downloaded yet" prompt is asking
+     * about, or -1 when no prompt is up. Visibility is tracked here rather than
+     * read back from microui because mu_get_container() *creates* a container
+     * with open=1 -- so merely looking the popup up would make it appear. */
+    int prompt_index;
+
     /* daemon control (D4) */
     char  script_path[CONFIG_PATH_MAX];   /* <project>/scripts/waybar-dictation.sh */
     int   script_ok;                      /* 0 disables Start/Stop, with a reason shown */

@@ -55,6 +55,17 @@ press **Start dictation**. Your choices are written to `configs/local.conf`, whi
 seeded from `configs/example.conf` so it keeps every comment and tuned setting; both the
 daemon and `scripts/waybar-dictation.sh` prefer that file when it exists.
 
+Pressing **Start dictation** with a selected model that hasn't been downloaded yet opens a
+prompt offering to fetch it, rather than starting a daemon that would fail on the missing
+file. This covers the cleanup model too — a cleanup model is optional, but once one is
+*selected*, the daemon treats a missing file as fatal.
+
+**Cleanup models are loaded onto the GPU** (`n_gpu_layers=99`), so their file size is
+roughly the VRAM they need, plus ~300 MB of compute buffer and KV cache. The listed sizes
+are there to be read before committing to a multi-GB download: on a 4 GB card, the 2.3 GB
+Gemma 3n E2B Q3_K_M fits comfortably where the 2.8 GB Q4_K_M is tight. Speech models run
+on the CPU backend and cost RAM, not VRAM.
+
 `make setup` deliberately builds **without whisper, llama or CUDA** — it links only
 `-lX11`. So on a fresh clone you can start the ~10-minute dependency build (`make`) in one
 terminal and download models in the setup window at the same time.
