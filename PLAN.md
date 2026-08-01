@@ -233,6 +233,24 @@ Each phase ends with an explicit end-to-end manual test (described per-phase abo
 
 ## Progress log
 
+### Post-Phase-D — `dev_of` deleted from the evdev key prober (done)
+
+- `--list-keys` kept `char dev_of[64][300]`, a 19 KB copy of `paths[]` — which is still in scope
+  at both places it was read. Replaced with `int path_of[64]` mapping pollfd slot to path index.
+- That also removes the `-Wformat-truncation` at the old line 166 rather than silencing it. The
+  warning was a **false positive**: gcc cannot prove `paths[i]` is NUL-terminated within its own
+  300-byte row, so it assumes the string may run to the end of the whole 19,200-byte object
+  ("up to 19199 bytes"). `paths[n]` is only ever written by a bounded `snprintf`, and real values
+  are ~20 characters. Deleting the redundant copy is a better answer than a `%.299s`.
+- **`make clean && make` now completes with zero warnings across the entire tree**, which is an
+  exact check since this was the only one left.
+- Verified by running the code, not just compiling it: `./dictation --list-keys` with keypresses
+  injected through `ydotool` (ydotoold active, `/dev/uinput` present) printed
+  `/dev/input/event21  code=30  name=A` and `code=57 name=SPACE` — correct path, keycode, name
+  and `%-24s` column alignment, from the two lines that previously read `dev_of`.
+- Daemon rebuilt and smoke-tested through `scripts/waybar-dictation.sh`: `active` then
+  `notactive`, left stopped.
+
 ### Post-Phase-D — the clip truncation, fixed in one shared place (done)
 
 - **`src/xclip.{c,h}`**: one `xclip_clamp()` used by both rasterizers. The narrowing to

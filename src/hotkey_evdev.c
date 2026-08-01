@@ -151,7 +151,12 @@ int hotkey_list_keys(void)
         return -1;
 
     struct pollfd pfds[MAX_PROBE_DEVICES];
-    char dev_of[MAX_PROBE_DEVICES][300];
+    /* Index into paths[] for each pollfd slot, rather than a second copy of the
+     * strings: paths[] is still in scope where these are printed below. The
+     * copy it replaces was 19 KB of stack, and gcc could not prove the source
+     * was NUL-terminated within its own row of the 2D array, so it warned about
+     * a truncation that cannot happen. */
+    int path_of[MAX_PROBE_DEVICES];
     int nfds = 0;
 
     for (int i = 0; i < n; i++) {
@@ -163,7 +168,7 @@ int hotkey_list_keys(void)
         }
         pfds[nfds].fd = fd;
         pfds[nfds].events = POLLIN;
-        snprintf(dev_of[nfds], sizeof(dev_of[0]), "%s", paths[i]);
+        path_of[nfds] = i;
         nfds++;
     }
 
@@ -196,10 +201,10 @@ int hotkey_list_keys(void)
                 continue;
             const char *name = key_name(ev.code);
             if (name)
-                printf("%-24s code=%-4d name=%s\n", dev_of[i], ev.code, name);
+                printf("%-24s code=%-4d name=%s\n", paths[path_of[i]], ev.code, name);
             else
                 printf("%-24s code=%-4d name=(unlisted, see linux/input-event-codes.h)\n",
-                       dev_of[i], ev.code);
+                       paths[path_of[i]], ev.code);
             fflush(stdout);
         }
     }
