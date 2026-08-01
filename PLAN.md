@@ -298,6 +298,33 @@ Each phase ends with an explicit end-to-end manual test (described per-phase abo
   reports 0 MB freed; Cancel deletes nothing; rows flip to "missing" with `[Get]` afterwards.
   `configs/local.conf` was backed up and restored, and the real `models/` directory is
   byte-for-byte as it was.
+- **Paths in the delete dialog are elided to fit, measured against the real font.** `mu_text`
+  only breaks a line at a space and its inner loop refuses to break when the word is the first
+  on the line (`microui.c:714-716`), so a path — which has no spaces — is never wrapped: it is
+  drawn at full width and clipped by the X clip rect, with nothing on screen indicating it
+  happened. That silently truncates the one thing the confirmation exists to disclose. The
+  earlier "widen the window" response was not a fix: the project's own resolved target is 78
+  characters, which is 468px in the 6px `fixed` fallback (fits) but 702px in the `9x15` this
+  window actually asks for (clips) — so the defect was latent purely because `9x15` is not
+  installed on this machine, and installing `xorg-fonts-misc` would expose it. `fit_path()` now
+  elides the middle, measuring with `ctx->text_width` rather than assuming a character width,
+  and grows the tail first so the filename — the part that says what is about to be deleted —
+  always survives. Verified with a 143-character path, which renders as
+  `...bbbb/cccc/dddd/eeee/ggml-base.en.bin`. The untruncated paths are written to both the log
+  pane and stderr, since the pane wraps on spaces too.
+- The message buffer went from 640 to 1024. With `link` and `target` each `CONFIG_PATH_MAX`
+  (512), the two path lines alone could reach 1024 bytes and `msg_append` would park at the NUL
+  — not an overflow, but the *tail* is dropped, and the tail is the "frees N MB" line and the
+  "Super+D will fail" warning. Same failure class as the clipping above by a different
+  mechanism: the confirmation silently dropping the information that makes it safe. Elision
+  already bounds each path to the body width, so this is belt-and-braces.
+- **A reviewer's claim that `MU_OPT_POPUP` blocks clicks reaching controls behind the dialog is
+  wrong, and the code comment now says why.** A static read of `in_hover_root()` supports it,
+  but `hover_root` is resolved from the *previous* frame's `next_hover_root`, and moving the
+  pointer onto that control — which a real mouse necessarily does — has already switched
+  `hover_root` back to the main window before the press lands. Verified live: with the delete
+  dialog open, clicking a catalog row both dismissed the dialog and selected that row, writing
+  `configs/local.conf`. The `!dl_active` guards are therefore genuinely reachable, not dead.
 - **Deleting the link is now conditional on the target actually going**, which is a real fix
   rather than a tidy-up. The code unlinked the link unconditionally while its own comment
   claimed otherwise, so a failed target unlink (permissions, read-only mount) would have

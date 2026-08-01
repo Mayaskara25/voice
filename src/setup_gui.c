@@ -37,9 +37,11 @@
 
 /* Same contract as SETUP_TITLE: the container key for the download prompt. */
 #define SETUP_PROMPT   "download prompt"
-/* Wide enough for an absolute model path on one line: the delete dialog names
- * every file it will unlink, and a clipped path defeats the disclosure that
- * makes the delete safe. The delete case is taller because it lists more. */
+/* Roomy enough for a typical absolute model path, but width alone cannot be
+ * relied on -- 78 characters is 468px in the 6px fallback font and 702px in the
+ * 9x15 this window actually asks for, and paths have no upper bound anyway.
+ * fit_path() is what guarantees a path is never silently clipped; this is just
+ * a comfortable default. The delete case is taller because it lists more. */
 #define SETUP_PROMPT_W 560
 #define SETUP_PROMPT_H 150
 #define SETUP_PROMPT_DEL_H 240
@@ -548,6 +550,51 @@ static unsigned long alloc_pixel(struct setup_gui *g, mu_Color c)
     return xc.pixel;
 }
 
+/* Renders `path` into `out` so that it is guaranteed to fit within `max_px`,
+ * eliding the middle if it does not.
+ *
+ * mu_text only ever breaks a line at a space (microui.c:714-716, and its inner
+ * loop refuses to break at all when the word is the first on the line), so a
+ * path -- which contains no spaces -- is never wrapped. It is drawn at full
+ * width and silently clipped by the X clip rect, which in the delete dialog
+ * truncates the very path the confirmation exists to disclose, and does so
+ * without any visual sign that it happened.
+ *
+ * Width is measured with the real font rather than assumed: the window asks for
+ * 9x15 but falls back to 6px 'fixed' when that is not installed, so any
+ * hardcoded characters-per-line estimate is wrong on one machine or the other.
+ * The tail is grown first because it ends in the filename, which is the part
+ * that says what is about to be deleted; the full untruncated path is also
+ * written to the log pane when the dialog opens. */
+static void fit_path(mu_Context *ctx, const char *path, int max_px, char *out, size_t cap)
+{
+    if (cap == 0)
+        return;
+    mu_Font f = ctx->style->font;
+    size_t len = strlen(path);
+
+    if (max_px <= 0 || ctx->text_width(f, path, (int)len) <= max_px) {
+        snprintf(out, cap, "%s", path);
+        return;
+    }
+
+    static const char ell[] = "...";
+    int ell_w = ctx->text_width(f, ell, 3);
+
+    size_t tail = 0;
+    while (tail < len &&
+           ctx->text_width(f, path + len - (tail + 1), (int)(tail + 1)) + ell_w <= max_px)
+        tail++;
+    /* Whatever budget the tail did not use goes to leading context. */
+    size_t head = 0;
+    while (head + tail < len &&
+           ctx->text_width(f, path, (int)(head + 1)) + ell_w +
+               ctx->text_width(f, path + len - tail, (int)tail) <= max_px)
+        head++;
+
+    snprintf(out, cap, "%.*s%s%.*s", (int)head, path, ell, (int)tail, path + len - tail);
+}
+
 /* Appends to a bounded buffer, returning the new length.
  *
  * snprintf returns what it WOULD have written, not what it did, so the obvious
@@ -596,6 +643,21 @@ static void open_delete_prompt(struct setup_gui *g, int index)
     g->prompt_index   = index;
     g->prompt_kind    = PROMPT_DELETE;
     g->prompt_pending = 1;
+
+    /* The dialog elides long paths to fit its width, so record the exact
+     * strings elsewhere. Both the pane and the terminal: the pane is where the
+     * user is looking, but it wraps on spaces just as the dialog does and a
+     * pathological path could clip there too, whereas stderr has no width. */
+    logf_append(g, "remove %s?\n  deletes %s\n", m->display, g->prompt_removal.link);
+    log_info("setup: remove %s -- deletes %s", m->id, g->prompt_removal.link);
+    if (g->prompt_removal.target[0] != '\0') {
+        logf_append(g, "  %s %s\n",
+                    g->prompt_removal.target_inside ? "deletes" : "keeps  ",
+                    g->prompt_removal.target);
+        log_info("setup: remove %s -- %s %s", m->id,
+                 g->prompt_removal.target_inside ? "deletes" : "keeps",
+                 g->prompt_removal.target);
+    }
 }
 
 static void do_delete(struct setup_gui *g, int index)
@@ -740,23 +802,40 @@ static void download_prompt(struct setup_gui *g)
      * struct download, so a second start would overwrite the live one and
      * orphan the running curl child along with its pipe fd; for Delete it is
      * because curl renaming its .part onto a path being unlinked concurrently
-     * is a race with no good outcome. Reachable either way: a click outside the
-     * dialog still activates the control behind it, so [Get] can be pressed
-     * with the dialog open, leaving a download running underneath it. */
+     * is a race with no good outcome.
+     *
+     * Reachable either way, and worth spelling out because a static read of
+     * in_hover_root() suggests otherwise: MU_OPT_POPUP does NOT stop a click
+     * reaching the control behind it. hover_root is resolved from the PREVIOUS
+     * frame's next_hover_root, and moving the pointer to that control -- which
+     * a real mouse necessarily does -- already switched hover_root back to the
+     * main window before the press lands. So one click both dismisses the
+     * dialog and presses the button under it. Verified live: with the dialog
+     * open, clicking a catalog row selected that row and wrote the config. */
     int busy = g->dl_active;
-    char msg[640];
+    char msg[1024];
 
     if (g->prompt_kind == PROMPT_DELETE) {
         const struct model_removal *r = &g->prompt_removal;
         size_t n = msg_append(msg, sizeof(msg), 0, "Remove %s?\n\n", m->display);
 
+        /* Elided to the body width so a long path cannot be silently clipped.
+         * "deletes  " is 9 characters of prefix that the path must share the
+         * row with. */
+        int avail = pc->rect.w - 2 * ctx->style->padding
+                    - ctx->text_width(ctx->style->font, "deletes  ", 9) - 6;
+        char shown[CONFIG_PATH_MAX];
+
         /* Every path that will be unlinked is named here. Disclosure is what
          * makes the delete safe -- particularly for the symlink case, where
          * what gets deleted is not the path shown in the model list. */
-        n = msg_append(msg, sizeof(msg), n, "deletes  %s\n", r->link);
-        if (r->target[0] != '\0')
+        fit_path(ctx, r->link, avail, shown, sizeof(shown));
+        n = msg_append(msg, sizeof(msg), n, "deletes  %s\n", shown);
+        if (r->target[0] != '\0') {
+            fit_path(ctx, r->target, avail, shown, sizeof(shown));
             n = msg_append(msg, sizeof(msg), n, "%s  %s\n",
-                           r->target_inside ? "deletes " : "keeps   ", r->target);
+                           r->target_inside ? "deletes " : "keeps   ", shown);
+        }
         n = msg_append(msg, sizeof(msg), n, "frees    %ld MB\n", r->bytes >> 20);
 
         /* The window's Start gate would catch a config pointing at a deleted
