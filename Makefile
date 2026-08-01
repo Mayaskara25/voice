@@ -22,7 +22,7 @@ SRCS := src/main.c src/config.c src/config_write.c src/model_catalog.c \
         src/stt_whisper.c src/inject_xtest.c src/inject_ydotool.c src/inject.c \
         src/llm_cleanup.c src/llm_styles.c \
         src/dictation_directives.c \
-        src/ipc_handoff.c src/font_xlib.c src/gui_xlib.c \
+        src/ipc_handoff.c src/font_xlib.c src/gui_xlib.c src/xclip.c \
         microui/src/microui.c
 OBJS := $(SRCS:.c=.o)
 
@@ -48,7 +48,7 @@ OBJS_TEST := $(OBJS_NOMAIN) $(SETUP_ONLY_OBJS)
 SETUP_BIN  := dictation-setup
 SETUP_SRCS := src/setup_main.c src/setup_gui.c src/downloader.c src/model_catalog.c \
               src/config_write.c src/config.c src/llm_styles.c src/log.c \
-              src/font_xlib.c microui/src/microui.c
+              src/font_xlib.c src/xclip.c microui/src/microui.c
 SETUP_OBJS := $(SETUP_SRCS:.c=.o)
 # -lX11 only: no whisper, no llama, no CUDA, and no -lcurl (curl is a child
 # process, not a link dependency).
@@ -63,6 +63,7 @@ DESKTOP_DIR   := $(XDG_DATA_HOME)/applications
 DESKTOP_FILE  := $(DESKTOP_DIR)/dictation.desktop
 
 TEST_SRCS := tests/test_config.c tests/test_config_write.c tests/test_catalog.c \
+             tests/test_xclip.c \
              tests/test_download.c tests/test_setup.c \
              tests/test_directives.c tests/test_ipc.c tests/test_stt.c tests/test_llm.c tests/test_inject.c
 TEST_BINS := $(TEST_SRCS:.c=)

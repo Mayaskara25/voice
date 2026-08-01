@@ -5,6 +5,7 @@
 #include "config.h"
 #include "config_write.h"
 #include "log.h"
+#include "xclip.h"
 
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
@@ -1058,21 +1059,16 @@ static void render(struct setup_gui *g)
     while (mu_next_command(ctx, &cmd)) {
         switch (cmd->type) {
         case MU_COMMAND_CLIP: {
-            /* Clamp to the window before narrowing to XRectangle's 16-bit
-             * fields. This is not defensive tidying: microui's "no clip"
-             * sentinel is `{0, 0, 0x1000000, 0x1000000}` (microui.c:50), and
-             * 0x1000000 truncated to an unsigned short is 0 -- a 0x0 clip that
-             * silently discards every later draw. mu_draw_text emits that
-             * sentinel to restore the clip after any partially-clipped string,
-             * so with a scrolling log pane it fired on nearly every frame and
-             * erased the whole footer. */
-            mu_Rect r = cmd->clip.rect;
-            int cx = r.x < 0 ? 0 : (r.x > g->width  ? g->width  : r.x);
-            int cy = r.y < 0 ? 0 : (r.y > g->height ? g->height : r.y);
-            int cw = r.w < 0 ? 0 : (r.w > g->width  - cx ? g->width  - cx : r.w);
-            int ch = r.h < 0 ? 0 : (r.h > g->height - cy ? g->height - cy : r.h);
-            XRectangle xr = { (short)cx, (short)cy,
-                              (unsigned short)cw, (unsigned short)ch };
+            /* Clamped before narrowing -- microui's "no clip" sentinel is
+             * 0x1000000 wide and truncates to 0 in XRectangle's unsigned short,
+             * a 0x0 clip that silently discards every later draw. This bit here
+             * first (D3: the curl output and footer vanished); the logic now
+             * lives in src/xclip.c so the panel and this window cannot drift
+             * apart on it. */
+            XRectangle xr;
+            xclip_clamp(cmd->clip.rect.x, cmd->clip.rect.y,
+                        cmd->clip.rect.w, cmd->clip.rect.h,
+                        g->width, g->height, &xr);
             XSetClipRectangles(g->dpy, g->gc, 0, 0, &xr, 1, Unsorted);
             break;
         }

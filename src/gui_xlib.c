@@ -1,4 +1,5 @@
 #include "gui_xlib.h"
+#include "xclip.h"
 #include "app_state.h"
 #include "inject.h"
 #include "log.h"
@@ -149,9 +150,13 @@ static void render(struct gui *g)
     while (mu_next_command(ctx, &cmd)) {
         switch (cmd->type) {
         case MU_COMMAND_CLIP: {
-            XRectangle xr = { (short)cmd->clip.rect.x, (short)cmd->clip.rect.y,
-                              (unsigned short)cmd->clip.rect.w,
-                              (unsigned short)cmd->clip.rect.h };
+            /* Clamped before narrowing: microui's "no clip" sentinel is
+             * 0x1000000 wide, which truncates to 0 in XRectangle's unsigned
+             * short and would discard every later draw. See src/xclip.c. */
+            XRectangle xr;
+            xclip_clamp(cmd->clip.rect.x, cmd->clip.rect.y,
+                        cmd->clip.rect.w, cmd->clip.rect.h,
+                        g->width, g->height, &xr);
             XSetClipRectangles(g->dpy, g->gc, 0, 0, &xr, 1, Unsorted);
             break;
         }

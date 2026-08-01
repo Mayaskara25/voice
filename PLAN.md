@@ -233,6 +233,39 @@ Each phase ends with an explicit end-to-end manual test (described per-phase abo
 
 ## Progress log
 
+### Post-Phase-D — the clip truncation, fixed in one shared place (done)
+
+- **`src/xclip.{c,h}`**: one `xclip_clamp()` used by both rasterizers. The narrowing to
+  `XRectangle`'s 16-bit fields lives *inside* the function, because the narrowing is the bug — a
+  helper that only clamped and left the cast at the call site would not test the thing that
+  breaks. Plain `int` in, so the file needs nothing from microui and can go in both `SRCS` and
+  `SETUP_SRCS` without disturbing the setup binary's `-lX11`-only link.
+- **It was reachable in the status panel, which the earlier "latent" note understated.**
+  `MU_COMMAND_CLIP` is only emitted when text is *partially* clipped (`microui.c:493/503`), and
+  vertical rows tile exactly so they rarely straddle — but a **word wider than the panel** always
+  does, and a transcript can easily contain one (a URL, a long filename). With such a token the
+  sentinel is emitted on an ordinary frame.
+- **Proved by A/B, same probe and geometry, only the clamp differing.** A temporary probe logged
+  the translated rectangle and put a label after `mu_text`:
+
+  | clamp | `in=16777216x16777216` becomes | `PROBE-FOOTER` |
+  |---|---|---|
+  | raw cast | `0x0` | missing |
+  | `xclip_clamp` | `300x100` | visible |
+
+  Two earlier attempts at a visual repro were **wrong and discarded**: with the text row laid out
+  as `-1` (extend to bottom) the footer lands below the 100px panel and is invisible for a
+  mundane layout reason, which is indistinguishable from the bug. That is why the probe ended up
+  logging the actual translated rectangle rather than relying on what did or did not appear.
+- `tests/test_xclip.c` pins the sentinel case plus negative origin, negative extent (must not
+  wrap to 65531), oversize, fully-off-surface and degenerate-surface. Confirmed to have teeth by
+  restoring the raw cast and watching 6 assertions fail.
+- Regression: the setup window renders unchanged with the shared helper (its inline copy was
+  removed), and `./dictation --gui` shows the panel with `_NET_ACTIVE_WINDOW` identical before
+  and after — a meaningful check this time, since a window actually held focus.
+- The probe was removed before committing and `git diff` reviewed to confirm only the intended
+  change remained.
+
 ### Phase D follow-up — removing models, and a Makefile bug worth more than the feature (done)
 
 - **`[Remove]` sits where `[Get]` sits.** The row already had a fourth column that was an empty
