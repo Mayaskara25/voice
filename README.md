@@ -3,9 +3,11 @@
 Hold a hotkey, speak, release — the transcribed text is typed into whatever window
 currently has focus, as if you'd typed it yourself. Everything runs **locally and
 offline**: audio never leaves the machine, there are no cloud APIs and no network
-dependency. The whole thing is a single C program linking directly against
+dependency. The daemon is a single C program linking directly against
 [whisper.cpp](https://github.com/ggml-org/whisper.cpp)'s C API — no Python, no subprocess
-orchestration, no HTTP service.
+orchestration, no HTTP service. A small companion binary, `dictation-setup`, picks and
+downloads models and starts/stops the daemon; it links only `-lX11`, and the daemon itself
+still contains no network code at all.
 
 Target platform: **Linux** (tested on Ubuntu 24.04 / X11 and Arch / Hyprland). Keystroke injection has two
 backends (`inject_backend` in the config): `xtest` (default, X11 only) and `ydotool`
@@ -29,7 +31,7 @@ experimentation.
 | **A** | capture → whisper → inject (headless) | ✅ done |
 | **C** | microui/Xlib status GUI (focus-preserving) | ✅ done |
 | **B** | optional GPU LLM cleanup via llama.cpp | ✅ done |
-| **D** | setup GUI (model picker + downloader) & `.desktop` entry | 🚧 planned |
+| **D** | setup GUI (model picker + downloader) & `.desktop` entry | ✅ done |
 
 ## One-time setup
 
@@ -38,15 +40,70 @@ sudo apt update
 sudo apt install -y cmake libxtst-dev        # build-essential, libasound2-dev, libx11-dev,
                                              # libxi-dev are assumed already present
 sudo usermod -aG input $USER                 # then LOG OUT AND BACK IN (newgrp won't propagate)
+```
 
-# download a whisper model (base.en = better accuracy, tiny.en = ~2x lower latency)
+### Recommended: the setup window
+
+```sh
+make setup          # builds ./dictation-setup only -- seconds, not minutes
+./dictation-setup
+```
+
+Pick a speech model and (optionally) a cleanup model, press **[Get]** on anything marked
+`MISSING` to download it with a live progress bar and the raw `curl` output in view, then
+press **Start dictation**. Your choices are written to `configs/local.conf`, which is
+seeded from `configs/example.conf` so it keeps every comment and tuned setting; both the
+daemon and `scripts/waybar-dictation.sh` prefer that file when it exists.
+
+`make setup` deliberately builds **without whisper, llama or CUDA** — it links only
+`-lX11`. So on a fresh clone you can start the ~10-minute dependency build (`make`) in one
+terminal and download models in the setup window at the same time.
+
+The list of available models lives in [`configs/models.conf`](configs/models.conf) as
+plain `kind|id|display|filename|url|size_bytes` records, so when an upstream URL moves
+that is a one-line data edit rather than a recompile.
+
+### Headless alternative (ssh, or no X display)
+
+The same downloader without a window — this is also the path to use if you'd rather not
+run a GUI at all:
+
+```sh
+./dictation-setup --list                    # what's available, and what's already present
+./dictation-setup --fetch-model base.en     # download one entry by id
+```
+
+### Manual model download (fallback)
+
+Nothing above is required; models can still be fetched by hand and referenced directly
+from a config:
+
+```sh
+# base.en = faster, less accurate; large-v3-turbo = what example.conf points at
 ./whisper.cpp/models/download-ggml-model.sh base.en
 ln -sf ../whisper.cpp/models/ggml-base.en.bin models/ggml-base.en.bin
 
-# Note: example.conf uses a quantized large-v3-turbo model instead (better accuracy,
-# ~150MB faster startup, lower VRAM than base.en). Download it with:
 ./whisper.cpp/models/download-ggml-model.sh large-v3-turbo
 ```
+
+### Optional: desktop entry (app launcher)
+
+```sh
+make install-desktop      # -> ~/.local/share/applications/dictation.desktop
+```
+
+"Dictation" then appears in the desktop app search menu like any installed application.
+Per-user, so **no root**; `make uninstall-desktop` removes it. The entry's `Exec=` is an
+absolute path generated at install time from the current checkout, which is why the
+tracked file is a template (`dictation.desktop.in`) — re-run `make install-desktop` if you
+move the repository.
+
+Launched this way the process starts with `cwd=$HOME`, so it locates the project from its
+own executable path and changes there before reading anything; `--dir PATH` overrides.
+
+Note that `Terminal=false` means startup errors (no X display, unreadable catalog) are
+logged where a launcher gives you nowhere to look — check the compositor's stderr or
+`journalctl --user` if clicking the icon appears to do nothing.
 
 ### Optional: Wayland support (`inject_backend=ydotool`)
 
@@ -55,6 +112,11 @@ Wayland compositor (Hyprland, GNOME, KDE/Wayland, ...) native Wayland clients si
 never receive the injected keystrokes at all — this isn't a bug to work around, it's
 Wayland's input-isolation security model. To inject there instead, use `ydotool`, which
 types via `/dev/uinput` at the kernel level and works under any compositor:
+
+**This limit applies only to keystroke injection, not to the windows.** The setup window
+and the status panel are ordinary X11 clients and render through XWayland on any
+compositor — Hyprland included, where both are developed and tested. Only *synthesizing
+input into someone else's window* is what Wayland forbids.
 
 ```sh
 sudo pacman -S ydotool      # Arch (official 'extra' repo)
@@ -165,12 +227,14 @@ Two non-obvious, machine-specific gotchas found during development (details in `
 ## Build
 
 ```sh
-make            # builds whisper.cpp + llama.cpp (CMake sub-builds, CUDA) + the dictation binary
+make            # builds whisper.cpp + llama.cpp (CMake sub-builds, CUDA) + both binaries
+make setup      # builds ONLY ./dictation-setup -- no whisper, no llama, no CUDA, seconds
 make test       # unit tests: config parser, self-pipe handoff, whisper on jfk.wav, LLM cleanup
 ```
 
-`make` targets: `all`, `app`, `deps-whisper`, `deps-llama`, `test`, `run`, `list-keys`,
-`clean`, `distclean` (also removes the slow-to-rebuild vendored `build/` dirs). The
+`make` targets: `all`, `app`, `setup`, `deps-whisper`, `deps-llama`, `test`, `run`,
+`list-keys`, `install-desktop`, `uninstall-desktop`, `clean`,
+`distclean` (also removes the slow-to-rebuild vendored `build/` dirs). The
 `deps-llama` sub-build compiles llama.cpp with `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75`
 and `-DGGML_CUDA_FORCE_MMQ=ON`. The second flag is needed for Turing GPUs without tensor cores
 (e.g. GTX 1650) to force integer matmul kernels instead of a degraded tensor-core fallback path.
@@ -191,6 +255,10 @@ currently links llama.cpp + CUDA unconditionally.
 ./dictation --test-mode                    # print transcripts instead of injecting
 ./dictation --gui                          # also show the status panel (or set gui_enabled=true)
 ```
+
+With no `--config`, the daemon reads `configs/local.conf` when it exists and falls back to
+`configs/example.conf` — the same resolution `dictation-setup` and
+`scripts/waybar-dictation.sh` use, so all three always agree on which file is in effect.
 
 Then: focus any text editor, **hold** the configured PTT key, speak, **release** — the text
 appears in the editor a second or two later. Ctrl-C to quit.
@@ -253,9 +321,12 @@ Included as flat source (upstream `.git` removed) under MIT licenses:
 
 ```
 src/            application C sources (see PLAN.md "Module breakdown")
-configs/        example.conf
-models/         gitignored; downloaded whisper (and, later, llama) models
+configs/        example.conf (tracked), models.conf (the model catalog),
+                local.conf (gitignored; written by dictation-setup)
+models/         gitignored; downloaded whisper and llama models
 tests/          assert-based unit tests (make test)
 scripts/        start/stop/status helper for Hyprland keybind + Waybar integration
+dictation.desktop.in
+                app-launcher entry template; `make install-desktop` fills in the path
 PLAN.md         the living design doc / source of truth across all phases
 ```

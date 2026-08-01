@@ -54,6 +54,14 @@ SETUP_OBJS := $(SETUP_SRCS:.c=.o)
 # process, not a link dependency).
 SETUP_LDLIBS := -lX11
 
+# Phase D5: the XDG desktop entry. Committed as a .in template because Exec=
+# must be an absolute path, which is machine-specific -- it is generated at
+# install time rather than baked into a tracked file. ?= so a caller's
+# XDG_DATA_HOME wins (make imports the environment).
+XDG_DATA_HOME ?= $(HOME)/.local/share
+DESKTOP_DIR   := $(XDG_DATA_HOME)/applications
+DESKTOP_FILE  := $(DESKTOP_DIR)/dictation.desktop
+
 TEST_SRCS := tests/test_config.c tests/test_config_write.c tests/test_catalog.c \
              tests/test_download.c tests/test_setup.c \
              tests/test_directives.c tests/test_ipc.c tests/test_stt.c tests/test_llm.c tests/test_inject.c
@@ -73,7 +81,8 @@ LDLIBS := -L$(WHISPER_BUILD)/src -lwhisper \
 
 BIN := dictation
 
-.PHONY: all deps-whisper deps-llama app setup test clean distclean run list-keys
+.PHONY: all deps-whisper deps-llama app setup test clean distclean run list-keys \
+        install-desktop uninstall-desktop
 
 all: deps-whisper deps-llama app setup
 
@@ -152,3 +161,29 @@ run: app
 
 list-keys: app
 	./$(BIN) --list-keys
+
+# --- desktop entry (Phase D5) ---
+# Per-user install under $XDG_DATA_HOME, so no root and no system directories.
+#
+# Depends on $(SETUP_BIN), deliberately NOT on `all`: `all` pulls deps-whisper
+# and deps-llama, which would drag the ~10-minute CUDA build into the one target
+# that exists to be usable before it. That is the whole D0 payoff. It also means
+# the installed entry can never point at a binary that was never built.
+#
+# Exec= resolves to $(CURDIR), i.e. this build tree, because there is no
+# `make install` for the binaries: models/ and configs/ live here, and
+# resolve_project_dir() in src/setup_main.c finds the project relative to the
+# executable. An entry pointing anywhere else would break that chdir.
+install-desktop: $(SETUP_BIN)
+	@mkdir -p "$(DESKTOP_DIR)"
+	sed 's|@BINDIR@|$(CURDIR)|g' dictation.desktop.in > "$(DESKTOP_FILE)"
+	@# No-op without a MimeType=, but harmless and expected by desktop tooling.
+	@command -v update-desktop-database >/dev/null 2>&1 && \
+		update-desktop-database "$(DESKTOP_DIR)" || true
+	@echo "installed $(DESKTOP_FILE)  ->  Exec=$(CURDIR)/$(SETUP_BIN)"
+
+uninstall-desktop:
+	rm -f "$(DESKTOP_FILE)"
+	@command -v update-desktop-database >/dev/null 2>&1 && [ -d "$(DESKTOP_DIR)" ] && \
+		update-desktop-database "$(DESKTOP_DIR)" || true
+	@echo "removed $(DESKTOP_FILE)"

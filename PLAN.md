@@ -233,6 +233,106 @@ Each phase ends with an explicit end-to-end manual test (described per-phase abo
 
 ## Progress log
 
+### Phase D5 — desktop integration (done)
+
+Phase D's sub-phases D0–D5 are all complete. Of the four Done-when criteria at the top of the
+Phase D section, three are verified below and the fourth — a real PTT dictation into a focused
+editor with `./dictation --gui`, confirming the editor never loses focus — needs a physical
+keypress and remains the user's to make. It is the same boundary D4 drew around Super+D (since
+confirmed by the user). Do not read "D5 done" as "Phase D signed off".
+
+- **`dictation.desktop.in` + `make install-desktop` / `uninstall-desktop`.** Tracked as a
+  template because `Exec=` must be an absolute path and that path is machine-specific;
+  `install-desktop` seds `@BINDIR@` → `$(CURDIR)` into
+  `$(XDG_DATA_HOME)/applications/dictation.desktop`. Per-user, so no root and no system
+  directories touched. Nothing generated lands in the tree, so `clean` and `.gitignore` needed
+  no changes.
+- **`install-desktop` depends on `$(SETUP_BIN)`, deliberately not on `all`.** `all` pulls
+  `deps-whisper deps-llama`, which would have dragged the ~10-minute CUDA build into the one
+  target whose entire point is being usable before it — silently destroying the D0 payoff. The
+  dependency also means the installed entry can never point at a binary that was never built.
+- The sed delimiter is `|`, not `/`, because the replacement is a path. Destination is
+  `mkdir -p`'d first (not guaranteed to exist on a minimal system), and
+  `update-desktop-database` is guarded by `command -v` — a genuine no-op with no `MimeType=`,
+  but free and expected by desktop tooling.
+- **`Exec=` points into the build tree (`$(CURDIR)`), which is correct here**, not a shortcut:
+  there is no `make install` for the binaries, `models/` and `configs/` live in the checkout, and
+  `resolve_project_dir()` locates the project relative to the executable. An entry pointing
+  anywhere else would break that chdir. Documented in the README that moving the repo means
+  re-running `make install-desktop`.
+- **`desktop-file-validate` exits 0** with one hint:
+  `Categories=Utility;Accessibility;AudioVideo;` "contains more than one main category;
+  application might appear more than once in the application menu". Left as-is — it is a hint,
+  not an error, and only one entry actually appeared. Trim the list if duplicates ever show up
+  in a real menu.
+- **The launcher path was the only thing here that could genuinely be wrong**, and it is the
+  first real exercise of D4's `/proc/self/exe` chdir. Checked twice: (a) `cd $HOME &&
+  /home/.../dictation-setup --list` with the environment preserved — logged `setup: working
+  directory /home/mayaskara/projects/voice` and resolved all three catalog entries; (b) the
+  installed entry launched for real with `gio launch`, which rendered both model lists with
+  correct `ready` status, the pre-selected models from the config, and Start enabled.
+  Deliberately not `env -i`, which would have stripped `DISPLAY`/`XAUTHORITY` and failed for an
+  unrelated reason that proved nothing.
+- **`StartupWMClass=Dictation` confirmed against the live window**, not just against the source:
+  `xprop` on the launched window gives `WM_CLASS = "dictation-setup", "Dictation"`, matching the
+  `XSetClassHint` in `setup_gui.c`. `_NET_CLIENT_LIST` held exactly one window, so the entry does
+  not produce a second unnamed dock icon.
+- **Regression re-checked with the window open**: `pgrep -x dictation` printed nothing — the
+  process-identity collision that killed the `--setup` design, asserted directly rather than
+  assumed. The user separately confirmed **Super+D** still behaves exactly as before, closing the
+  one D4 item that needed a physical keypress. The daemon was left stopped and the tree clean.
+- **README brought up to date for the whole of Phase D**, which it had not been since D1: Status
+  row D marked done, the setup window documented as the recommended path with `--list` /
+  `--fetch-model` kept as a documented headless fallback (a fresh clone over ssh still needs it),
+  the manual `download-ggml-model.sh` flow kept below that rather than deleted, and the intro's
+  "the whole thing is a single C program" corrected — it is now a daemon plus a companion binary,
+  and the sentence that matters ("the daemon contains no network code") is stated explicitly
+  instead of being implied by the old wording.
+- Two README sentences exist to stop a reader drawing a wrong conclusion. First, that the Wayland
+  limitation applies **only to keystroke injection**, not to the windows — both GUIs are ordinary
+  X11 clients and render through XWayland anywhere, so the new section does not read as
+  contradicting the `ydotool` section. Second, that `Terminal=false` sends startup errors (no X
+  display, unreadable catalog) somewhere a launcher gives the user nowhere to look, so a dead
+  icon is diagnosable via `journalctl --user`. Documentation only; a fallback error dialog was
+  considered and rejected as out of scope.
+- **Still deliberately not done**, carried from D4: tailing the daemon's `$LOG_FILE` into the
+  output pane for diagnosing a failed start. Phase D's contract is the readiness state, which
+  comes from the script. It remains the most useful next increment if the window gets more work.
+- **Still outstanding and untouched by design**: the `unsigned short` clip truncation at
+  `src/gui_xlib.c:151-157`, the exact bug fixed in `setup_gui.c` during D3. It is latent in the
+  status panel (it needs both a partially-clipped string and something drawn after it), and
+  Phase D's contract is that `gui_xlib.c` is not modified, so fixing it belongs in its own
+  deliberate commit against a daemon that is in daily use.
+- **`Icon=audio-input-microphone` confirmed to actually resolve**, not just assumed to be a stock
+  name: 64 matching files across the installed themes (breeze-dark, Adwaita, …). A stock name that
+  no installed theme provides would have rendered as a blank tile in the launcher, which is
+  invisible in every check that does not involve a real menu.
+- **`./dictation --gui` re-checked directly** (the fourth Done-when criterion, and the one Phase D
+  could most plausibly have broken, since `SRCS` *did* change across D0/D1 — `llm_styles.c` split
+  out, `config_write.c` and `model_catalog.c` added, and `main.c:241` now calls
+  `config_default_path()`). The daemon started, logged `gui: status panel created (300x100,
+  override-redirect)`, reached `dictation: ready`, and shut down cleanly on SIGINT.
+  `_NET_ACTIVE_WINDOW` was `0x0` both before and after the panel appeared, so no focus was taken —
+  **but note that check is weak here**: nothing else on this X server held focus to begin with, so
+  "unchanged" is close to vacuous. The mechanism (override_redirect=True) is what actually
+  guarantees it, and the real test is the user's dictation-into-an-editor pass.
+- Incidental finding, recorded because it is confusing otherwise: under Hyprland's XWayland the
+  panel **does** appear in `_NET_CLIENT_LIST` despite being override-redirect (it showed up as
+  `0x600002` with no `WM_CLASS`/`WM_NAME`, and disappeared exactly when the daemon stopped, which
+  is how it was identified). That is a compositor quirk, not a regression — presence in that list
+  is not the same as being focusable, and focus was not taken.
+- Also incidental, D3 territory rather than D5: the setup window's default font `9x15` is **not
+  available on this X server** and `font_open` falls back to `fixed` (visible in the launch log;
+  the daemon's panel asks for `fixed` directly and gets it, so only the setup window is affected).
+  The spec's rationale for 9x15 was that 13px is cramped for a widget-dense form, so that intent
+  is currently unrealized here. It renders perfectly legibly regardless — see the D5 screenshot —
+  so this is a note, not a defect. `--font XLFD` overrides it. (`xlsfonts` is not installed on
+  this machine, so the fallback log line is the evidence, not a font-list dump.)
+- `make test` runs all ten suites green with no skips (`test_stt` included, since the sample wav
+  and models are present). No file in `SRCS` changed **in this phase**, so the `dictation` binary
+  is byte-identical to the one D4 left behind — though not to the pre-Phase-D one, per the D0/D1
+  changes noted above.
+
 ### Phase D4 — daemon start/stop from the window (done)
 
 - **Start/Stop shell out to `scripts/waybar-dictation.sh`**, never reimplemented. That script
